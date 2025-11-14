@@ -1131,7 +1131,6 @@ const DEFAULT_PAGE_SIZE = 'letter';
             textPath: null,
             align: 'center',
             verticalAlign: 'top',
-            y: 0,
             padding: 0,
             borderWidth: 0,
             shadow: false,
@@ -1172,7 +1171,6 @@ const DEFAULT_PAGE_SIZE = 'letter';
       base.className = base.className || 'highcharts-data-label-wrapper';
       base.align = base.align || 'center';
       base.verticalAlign = base.verticalAlign || 'top';
-  if (base.y == null) base.y = 0;
       if (base.padding == null) base.padding = 0;
       if (base.borderWidth == null) base.borderWidth = 0;
       if (base.shadow == null) base.shadow = false;
@@ -1224,6 +1222,9 @@ const DEFAULT_PAGE_SIZE = 'letter';
       });
     });
 
+    // Commented out to allow CSS to control label positioning via transforms
+    // This event handler was overriding CSS positioning by directly setting y attribute and style.top
+    /*
     Highcharts.addEvent(Highcharts.Series, 'afterDrawDataLabels', function () {
       if (!this.points) return;
       this.points.forEach((point) => {
@@ -1266,6 +1267,7 @@ const DEFAULT_PAGE_SIZE = 'letter';
         }
       });
     });
+    */
   }
 
   if (typeof w.Highcharts !== 'undefined') {
