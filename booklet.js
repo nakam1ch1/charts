@@ -1222,6 +1222,9 @@ const DEFAULT_PAGE_SIZE = 'letter';
       });
     });
 
+    // Commented out to allow CSS to control label positioning via transforms
+    // This event handler was overriding CSS positioning by directly setting y attribute and style.top
+    /*
     Highcharts.addEvent(Highcharts.Series, 'afterDrawDataLabels', function () {
       if (!this.points) return;
       this.points.forEach((point) => {
@@ -1264,6 +1267,7 @@ const DEFAULT_PAGE_SIZE = 'letter';
         }
       });
     });
+    */
   }
 
   if (typeof w.Highcharts !== 'undefined') {
