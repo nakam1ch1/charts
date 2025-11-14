@@ -1,0 +1,205 @@
+:root {
+  --page-width: 11in;
+  --page-height: 8.5in;
+}
+
+body {
+  background: #f2f5fa;
+  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+.navbar {
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.navbar .btn,
+.navbar label.btn {
+  font-weight: 600;
+  border-width: 2px;
+}
+
+.navbar label.btn input[type="file"] {
+  display: none;
+}
+
+.highcharts-data-label-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.highcharts-data-label-custom {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0;
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  pointer-events: none;
+  position: relative;
+  overflow: visible;
+  background: none;
+  z-index: 6;
+}
+
+.highcharts-data-label-custom.is-below {
+  flex-direction: column-reverse;
+}
+
+.highcharts-data-label-text {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 3px;
+  min-width: 16px;
+  white-space: nowrap;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  line-height: 1.05;
+  transform: rotate(-90deg);
+  transform-origin: center center;
+  background: rgba(255, 255, 255, 0.65);
+  border-radius: 3px;
+  box-shadow: none;
+  text-shadow: none;
+  overflow: visible;
+  z-index: 1;
+}
+
+.highcharts-data-label-text::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 50%;
+  width: calc(100% - 6px);
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse 85% 125% at 50% 50%, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.4) 58%, rgba(255, 255, 255, 0.05) 88%, rgba(255, 255, 255, 0) 100%);
+  border-radius: 4px;
+  filter: blur(4px);
+  opacity: 0.68;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.highcharts-data-label-text::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: -1px;
+  right: -1px;
+  background: radial-gradient(ellipse 95% 110% at 50% 50%, rgba(255, 255, 255, 0.54) 0%, rgba(255, 255, 255, 0.22) 60%, rgba(255, 255, 255, 0) 100%);
+  border-radius: 3px;
+  filter: blur(3px);
+  opacity: 0.6;
+  pointer-events: none;
+  z-index: -2;
+}
+
+.highcharts-data-label-custom.has-long-number .highcharts-data-label-text {
+  letter-spacing: 0.05em;
+}
+
+.highcharts-data-label-custom.has-extended-length .highcharts-data-label-text {
+  padding: 4px 4px;
+}
+.highcharts-tooltip {
+  z-index: 5000 !important;
+}
+
+.accordion-button:focus {
+  box-shadow: none;
+}
+
+.badge-light {
+  background: rgba(148, 163, 184, 0.18);
+  color: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.helper-text {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.scroll-pane {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: #64748b;
+}
+
+.dragging {
+  opacity: 0.5;
+}
+
+.drag-target {
+  outline: 2px dashed rgba(99, 102, 241, 0.6);
+  outline-offset: 4px;
+}
+
+.stat-grid .drag-handle {
+  position: absolute;
+  right: 0.25rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 1rem;
+}
+
+.graph-options {
+  border-top: 1px dashed rgba(148, 163, 184, 0.35);
+  padding-top: 1rem;
+}
+
+.logo-preview {
+  width: 160px;
+  height: 100px;
+  background: rgba(241, 245, 249, 0.65);
+}
+
+.division-container-wrapper {
+  background: #ffffff;
+  min-height: 320px;
+}
+
+.division-container {
+  min-height: 240px;
+}
+
+#divisionSettingsModal .modal-dialog {
+  max-width: 720px;
+}
+
+#divisionSettingsModal .modal-body {
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+
+.csv-editor-table .csv-editor-input {
+  font-size: 0.85rem;
+}
+
+.csv-editor-table textarea.csv-editor-input {
+  resize: vertical;
+  min-height: 56px;
+}
+
+.csv-editor-table .table td:first-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.csv-editor-table .csv-editor-warning {
+  border-color: rgba(217, 119, 6, 0.65) !important;
+  background-color: rgba(254, 243, 199, 0.55);
+}
+

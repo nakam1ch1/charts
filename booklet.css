@@ -1,0 +1,415 @@
+:root {
+  --page-width: 11in;
+  --page-height: 8.5in;
+}
+
+body {
+  background: #f2f5fa;
+  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+.navbar {
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.navbar .btn,
+.navbar label.btn {
+  font-weight: 600;
+  border-width: 2px;
+}
+
+.navbar label.btn input[type="file"] {
+  display: none;
+}
+
+.card {
+  border-radius: 1rem;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  box-shadow: 0 24px 48px -28px rgba(15, 23, 42, 0.35);
+}
+
+.division-card {
+  border-left: 6px solid var(--division-accent, #2563eb);
+  background: linear-gradient(135deg,
+      rgba(var(--division-accent-rgb, 37, 99, 235), 0.1) 0%,
+      rgba(255, 255, 255, 0.94) 68%);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.division-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 26px 52px -30px rgba(var(--division-accent-rgb, 37, 99, 235), 0.55);
+}
+
+.division-card .card-header {
+  border-bottom: 1px solid rgba(var(--division-accent-rgb, 37, 99, 235), 0.18);
+  background: rgba(var(--division-accent-rgb, 37, 99, 235), 0.08);
+}
+
+.division-card .card-body {
+  background: rgba(var(--division-accent-rgb, 37, 99, 235), 0.04);
+}
+
+.division-card .accordion-button {
+  background: rgba(var(--division-accent-rgb, 37, 99, 235), 0.08);
+  color: #0f172a;
+  border-radius: 0.75rem;
+  transition: background 0.2s ease;
+}
+
+.division-card .accordion-button:not(.collapsed) {
+  background: rgba(var(--division-accent-rgb, 37, 99, 235), 0.16);
+  color: #0f172a;
+  box-shadow: inset 0 0 0 1px rgba(var(--division-accent-rgb, 37, 99, 235), 0.18);
+}
+
+.division-card .accordion-button:focus {
+  box-shadow: 0 0 0 0.15rem rgba(var(--division-accent-rgb, 37, 99, 235), 0.45);
+}
+
+.division-card .badge-light {
+  background: rgba(var(--division-accent-rgb, 37, 99, 235), 0.16);
+  color: #0f172a;
+  border: 1px solid rgba(var(--division-accent-rgb, 37, 99, 235), 0.25);
+}
+
+.color-chip-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.2);
+  display: inline-flex;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.color-chip-btn:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+}
+
+.color-chip-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.5rem 1.25rem;
+}
+
+.stat-grid .form-check {
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
+  padding-right: 2rem;
+  position: relative;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.35);
+}
+
+.stat-grid .form-check:last-child {
+  border-bottom: none;
+}
+
+.stat-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-label span:first-child {
+  font-weight: 600;
+}
+
+.stat-label small {
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.highcharts-data-label-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.highcharts-data-label span,
+.highcharts-label span {
+  display: inline-block !important;
+  white-space: nowrap !important;
+  width: auto !important;
+  max-width: fit-content !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.highcharts-label-box,
+.highcharts-data-label-box {
+  width: auto !important;
+  height: auto !important;
+  max-width: fit-content !important;
+  max-height: fit-content !important;
+  transform: translate(0, 0) !important;
+}
+
+.highcharts-data-label-custom {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0;
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  pointer-events: none;
+  position: relative;
+  overflow: visible;
+  background: none;
+  z-index: 6;
+}
+
+.highcharts-data-label-custom.is-below {
+  flex-direction: column-reverse;
+}
+
+.highcharts-data-label-text {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 3px;
+  min-width: 16px;
+  white-space: nowrap;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  line-height: 1.05;
+  transform: rotate(-90deg);
+  transform-origin: center center;
+  background: rgb(255, 255, 255);
+  border-radius: 3px;
+  box-shadow: none;
+  text-shadow: none;
+  overflow: visible;
+  z-index: 1;
+}
+
+.highcharts-data-label-text::before {
+  content: '';
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 50%;
+  width: calc(100% - 5px);
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse 85% 125% at 50% 50%, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.4) 58%, rgba(255, 255, 255, 0.05) 88%, rgba(255, 255, 255, 0) 100%);
+  border-radius: 4px;
+  filter: blur(3px);
+  opacity: 0.6;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.highcharts-data-label-text::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: -1px;
+  right: -1px;
+  background: radial-gradient(ellipse 95% 110% at 50% 50%, rgba(255, 255, 255, 0.54) 0%, rgba(255, 255, 255, 0.22) 60%, rgba(255, 255, 255, 0) 100%);
+  border-radius: 3px;
+  filter: blur(2px);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: -2;
+}
+
+.highcharts-data-label-custom .highcharts-data-label-tick {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, 0);
+  width: 1px;
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.highcharts-data-label-custom.has-long-number .highcharts-data-label-text {
+  letter-spacing: 0.05em;
+}
+
+.highcharts-data-label-custom.has-extended-length .highcharts-data-label-text {
+  padding: 4px 4px;
+}
+.highcharts-tooltip {
+  z-index: 5000 !important;
+}
+
+.accordion-button:focus {
+  box-shadow: none;
+}
+
+.badge-light {
+  background: rgba(148, 163, 184, 0.18);
+  color: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.helper-text {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.scroll-pane {
+  max-height: 100%;
+  overflow: auto;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: #64748b;
+}
+
+.dragging {
+  opacity: 0.5;
+}
+
+.drag-target {
+  outline: 2px dashed rgba(99, 102, 241, 0.6);
+  outline-offset: 4px;
+}
+
+.stat-grid .drag-handle {
+  position: absolute;
+  right: 0.25rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 1rem;
+}
+
+.graph-options {
+  border-top: 1px dashed rgba(148, 163, 184, 0.35);
+  padding-top: 1rem;
+}
+
+.logo-preview {
+  width: 160px;
+  height: 100px;
+  background: rgba(241, 245, 249, 0.65);
+}
+
+.logo-dropzone {
+  position: relative;
+  border: 2px dashed rgba(148, 163, 184, 0.6);
+  border-radius: 1rem;
+  min-height: 160px;
+}
+
+.logo-dropzone img {
+  max-height: 140px;
+  object-fit: contain;
+}
+
+.logo-dropzone .placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  text-align: center;
+  padding: 1.5rem;
+  font-size: 0.85rem;
+}
+
+.division-container-wrapper {
+  background: #ffffff;
+  min-height: 320px;
+}
+
+.division-container {
+  min-height: 240px;
+}
+
+#divisionSettingsModal .modal-dialog {
+  max-width: 720px;
+}
+
+#divisionSettingsModal .modal-body {
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+
+.csv-editor-table .csv-editor-input {
+  font-size: 0.85rem;
+}
+
+.csv-editor-table textarea.csv-editor-input {
+  resize: vertical;
+  min-height: 56px;
+}
+
+.csv-editor-table .table td:first-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.csv-editor-table .csv-editor-warning {
+  border-color: rgba(217, 119, 6, 0.65) !important;
+  background-color: rgba(254, 243, 199, 0.55);
+}
+
+/* === FIX: TICK + LABEL VERTICAL ALIGNMENT === */
+.highcharts-data-label-custom .highcharts-data-label-tick {
+    width: 1px !important;
+    background: rgba(15,23,42,0.55) !important;
+    position: absolute !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+}
+
+/* tighter halo for single characters */
+.highcharts-data-label-text.single-char::before,
+.highcharts-data-label-text.single-char::after {
+    filter: blur(1.5px) !important;
+    opacity: 0.35 !important;
+}
+/* Force HTML data labels to render as real HTML, NOT collapsed foreignObject */
+.highcharts-data-label-custom {
+    display: inline-flex !important;
+    flex-direction: column;
+    align-items: center;
+    width: auto !important;
+    inline-size: auto !important;
+    max-width: none !important;
+    position: static !important; /* removes Highcharts absolute inset */
+    transform: translateY(0); /* reset */
+}
+
+/* ---- TICK ---- */
+.highcharts-data-label-custom .highcharts-data-label-tick {
+    display: block;
+    width: 1px;
+    height: 12px;
+    background: #000;
+    margin: 2px auto 0 auto;
+}
+
+/* ---- LENGTH-BASED LIFTS ---- */
+
+/* 1 digit */
+.highcharts-data-label-custom.is-short-number {
+    transform: translateY(-14px);
+}
+
+/* 3 characters */
+.highcharts-data-label-custom.is-medium-number {
+    transform: translateY(-22px);
+}
+
+/* 6+ characters */
+.highcharts-data-label-custom.is-long-number {
+    transform: translateY(-30px);
+}

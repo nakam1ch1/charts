@@ -1,0 +1,7829 @@
+// *** MERGED booklet.js (original + scaling/labels/modal injected) ***
+
+const PAGE_SIZES = {
+  letter: { key: 'letter', label: 'Letter (11 × 8.5 in)', width: '11in', height: '8.5in' },
+  legal: { key: 'legal', label: 'Legal (14 × 8.5 in)', width: '14in', height: '8.5in' },
+  tabloid: { key: 'tabloid', label: 'Tabloid (17 × 11 in)', width: '17in', height: '11in' },
+  wide12x9: { key: 'wide12x9', label: 'Wide (12 × 9 in)', width: '12in', height: '9in' },
+  grand18x12: { key: 'grand18x12', label: 'Oversize (18 × 12 in)', width: '18in', height: '12in' }
+};
+
+const DEFAULT_PAGE_SIZE = 'letter';
+
+(function (w) {
+  'use strict';
+
+  if (typeof w.toFiniteNumber !== 'function') {
+    w.toFiniteNumber = function toFiniteNumberGlobal(value) {
+      if (value == null) return null;
+      if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+      }
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        const numeric = Number(trimmed);
+        return Number.isFinite(numeric) ? numeric : null;
+      }
+      if (typeof value === 'boolean') {
+        return value ? 1 : 0;
+      }
+      if (value instanceof Date) {
+        const time = value.getTime();
+        return Number.isFinite(time) ? time : null;
+      }
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    };
+  }
+
+  const toFiniteNumber = w.toFiniteNumber;
+
+  const CM_TO_PX = 37.7952755906;
+  const MARKER_TICK_LENGTH_PX = Math.round(0.4 * CM_TO_PX);
+  const LABEL_CLEARANCE_PX = Math.max(1, Math.round(0.04 * CM_TO_PX));
+  const DROPLINE_COLOR = 'rgba(15,23,42,0.3)';
+
+  const isNum = (v) => typeof v === 'number' && isFinite(v);
+
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+  const decs = (value) => {
+    if (!isNum(value)) return 0;
+    const str = String(value);
+    if (!str.includes('.')) return 0;
+    return str.split('.')[1].length;
+  };
+
+  const detectThousandths = (values) => values.some((v) => {
+    if (!isNum(v)) return false;
+    return Math.abs(v) < 1 && countDecimals(v) >= 3;
+  });
+
+  const countDecimals = (value) => {
+    if (!Number.isFinite(value)) return 0;
+    if (Math.abs(value) < 1e-12) return 0;
+    const normalized = Number(value.toPrecision(12));
+    if (!Number.isFinite(normalized)) return 0;
+    const str = String(normalized).toLowerCase();
+    if (str.includes('e')) {
+      const [base, exponent] = str.split('e');
+      const decimalsPart = (base.split('.')[1] || '').replace(/0+$/, '');
+      const exp = Number(exponent);
+      return Math.max(0, decimalsPart.length - exp);
+    }
+
+    if (!str.includes('.')) return 0;
+    return str.split('.')[1].replace(/0+$/, '').length;
+  };
+
+  function sanitizePointForSeries(point) {
+    if (Array.isArray(point)) {
+      return point.map((value) => toFiniteNumber(value));
+    }
+    if (point && typeof point === 'object') {
+      const clone = { ...point };
+      if (clone.y != null) {
+        const y = toFiniteNumber(clone.y);
+        clone.y = y;
+        if (y == null) {
+          clone.nullReason = clone.nullReason || 'Invalid y value';
+        }
+      }
+      if (clone.x != null) {
+        clone.x = toFiniteNumber(clone.x);
+      }
+      return clone;
+    }
+    return toFiniteNumber(point);
+  }
+
+  function sanitizeSeriesDataArray(seriesData) {
+    if (!Array.isArray(seriesData)) return [];
+    return seriesData.map((point) => sanitizePointForSeries(point));
+  }
+
+  function sanitizeSeriesCollection(collection) {
+    if (!Array.isArray(collection)) return [];
+    return collection.map((series) => {
+      if (!series || typeof series !== 'object') return series;
+      return { ...series, data: sanitizeSeriesDataArray(series.data) };
+    });
+  }
+
+  if (typeof globalThis === 'object' && globalThis) {
+    if (typeof globalThis.sanitizePointForSeries !== 'function') {
+      globalThis.sanitizePointForSeries = sanitizePointForSeries;
+    }
+    if (typeof globalThis.sanitizeSeriesDataArray !== 'function') {
+      globalThis.sanitizeSeriesDataArray = sanitizeSeriesDataArray;
+    }
+    globalThis.sanitizeSeriesCollection = sanitizeSeriesCollection;
+  } else if (typeof window !== 'undefined' && window) {
+    if (typeof window.sanitizePointForSeries !== 'function') {
+      window.sanitizePointForSeries = sanitizePointForSeries;
+    }
+    if (typeof window.sanitizeSeriesDataArray !== 'function') {
+      window.sanitizeSeriesDataArray = sanitizeSeriesDataArray;
+    }
+    window.sanitizeSeriesCollection = sanitizeSeriesCollection;
+  }
+
+  if (typeof window !== 'undefined' && window.Highcharts) {
+    try {
+      window.Highcharts.setOptions({ accessibility: { enabled: false } });
+    } catch (e) {
+      /* noop */
+    }
+    installHighchartsChartSanitizer(window.Highcharts);
+  }
+
+  function sanitizePointForChart(point, seriesIndex, pointIndex) {
+    const logInvalid = () => {
+      console.warn(`🧹 Sanitized invalid point: series[${seriesIndex}] point[${pointIndex}]`, point);
+    };
+
+    if (typeof point === 'number') {
+      return Number.isFinite(point) ? point : createNullPoint();
+    }
+
+    if (Array.isArray(point)) {
+      if (!point.length) {
+        logInvalid();
+        return createNullPoint();
+      }
+      const clone = point.slice();
+      const hasX = clone.length >= 2;
+      const rawY = clone[hasX ? 1 : 0];
+      const parsedY = parseFloat(rawY);
+      if (Number.isFinite(parsedY)) {
+        if (hasX) {
+          const parsedX = parseFloat(clone[0]);
+          if (Number.isFinite(parsedX)) {
+            clone[0] = parsedX;
+          }
+        }
+        clone[hasX ? 1 : 0] = parsedY;
+        return clone;
+      }
+      logInvalid();
+      if (hasX) {
+        const parsedX = parseFloat(clone[0]);
+        if (Number.isFinite(parsedX)) {
+          return createNullPoint({ x: parsedX });
+        }
+      }
+      return createNullPoint();
+    }
+
+    if (point && typeof point === 'object') {
+      const parsedY = parseFloat(point.y);
+      if (Number.isFinite(parsedY)) {
+        const parsedX = parseFloat(point.x);
+        const next = { ...point, y: parsedY };
+        if (Number.isFinite(parsedX)) {
+          next.x = parsedX;
+        }
+        return next;
+      }
+      logInvalid();
+      const base = { ...point, y: null, isNull: true };
+      if (Number.isFinite(parseFloat(point?.x))) {
+        base.x = parseFloat(point.x);
+      }
+      const labels = base.dataLabels && typeof base.dataLabels === 'object'
+        ? { ...base.dataLabels, enabled: false }
+        : { enabled: false };
+      base.dataLabels = labels;
+      return base;
+    }
+
+    const parsed = parseFloat(point);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+    logInvalid();
+    return createNullPoint();
+  }
+
+  function extractFiniteY(point) {
+    if (typeof point === 'number') {
+      return Number.isFinite(point) ? point : null;
+    }
+    if (Array.isArray(point)) {
+      if (point.length >= 2) return toFiniteNumber(point[1]);
+      if (point.length === 1) return toFiniteNumber(point[0]);
+      return null;
+    }
+    if (point && typeof point === 'object') {
+      if (Object.prototype.hasOwnProperty.call(point, 'y')) {
+        return toFiniteNumber(point.y);
+      }
+      if (Object.prototype.hasOwnProperty.call(point, 'value')) {
+        return toFiniteNumber(point.value);
+      }
+    }
+    return toFiniteNumber(point);
+  }
+
+  function sanitizeSeriesDataForChart(seriesArray) {
+    if (!Array.isArray(seriesArray)) return seriesArray;
+    return seriesArray.map((series, seriesIndex) => {
+      if (!series || !Array.isArray(series.data)) return series;
+      const cleanData = series.data.map((point, pointIndex) => sanitizePointForChart(point, seriesIndex, pointIndex));
+      return { ...series, data: cleanData };
+    });
+  }
+
+  function applyHighchartsNaNBlocker(Highcharts) {
+    if (!Highcharts || !Highcharts.SVGElement || Highcharts.__bookletNaNBlockerInstalled) return;
+    Highcharts.__bookletNaNBlockerInstalled = true;
+    const originalAttr = Highcharts.SVGElement.prototype.attr;
+    if (typeof originalAttr !== 'function') return;
+    Highcharts.SVGElement.prototype.attr = function attrWrapper(a, b, c, d) {
+      const incoming = typeof a === 'string' ? { [a]: b } : (a || {});
+      if (!incoming || typeof incoming !== 'object') {
+        return originalAttr.call(this, incoming, undefined, c, d);
+      }
+
+      const sanitized = {};
+      Object.keys(incoming).forEach((key) => {
+        let value = incoming[key];
+        if (typeof value === 'string' && value.includes('NaN')) {
+          if (key === 'transform') {
+            const cleaned = value.replace(/NaN/g, '0');
+            if (cleaned.trim().length === 0) {
+              return;
+            }
+            value = cleaned;
+          } else {
+            return;
+          }
+        }
+        if (typeof value === 'number' && !Number.isFinite(value)) {
+          value = 0;
+        }
+        sanitized[key] = value;
+      });
+
+      if (!Object.keys(sanitized).length) {
+        return originalAttr.call(this, {}, undefined, c, d);
+      }
+      return originalAttr.call(this, sanitized, undefined, c, d);
+    };
+  }
+
+  // function installHighchartsChartSanitizer(Highcharts) {
+  //   if (!Highcharts || Highcharts.__bookletChartSanitizerInstalled) return;
+  //   const originalChart = Highcharts.chart;
+  //   if (typeof originalChart !== 'function') return;
+  //   Highcharts.__bookletChartSanitizerInstalled = true;
+  //   Highcharts.chart = function sanitizedChart(container, options, ...rest) {
+  //     if (options && Array.isArray(options.series)) {
+  //       options = { ...options, series: sanitizeSeriesDataForChart(options.series) };
+  //     }
+  //     return originalChart.call(this, container, options, ...rest);
+  //   };
+  // }
+
+  const roundToDecimals = (value, decimals) => {
+    const safeDecimals = Math.max(0, Math.min(decimals, 8));
+    const factor = Math.pow(10, safeDecimals + 2);
+    return Math.round(value * factor) / factor;
+  };
+
+  const niceStep = (rawStep, constraints = {}) => {
+    const allowDecimalTicks = !!constraints.allowDecimalTicks;
+    const minimum = allowDecimalTicks
+      ? Math.max(Number.EPSILON, constraints.minimum || Number.EPSILON)
+      : Math.max(1, constraints.minimum || 1);
+    if (!Number.isFinite(rawStep) || rawStep === 0) return minimum;
+    const absStep = Math.abs(rawStep);
+    const exponent = Math.floor(Math.log10(absStep));
+    const magnitude = Math.pow(10, exponent);
+    const fraction = absStep / magnitude;
+    let niceFraction;
+    if (fraction <= 1) niceFraction = 1;
+    else if (fraction <= 2.5) niceFraction = 2;
+    else if (fraction <= 5) niceFraction = 5;
+    else niceFraction = 10;
+    let step = niceFraction * magnitude;
+    if (constraints.isPercent) {
+      const percentChoices = allowDecimalTicks
+        ? [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 25, 50]
+        : [1, 2, 5, 10, 20, 25, 50];
+      const adjusted = percentChoices.find((choice) => choice >= step) || percentChoices[percentChoices.length - 1];
+      step = Math.max(adjusted, minimum);
+    } else {
+      step = Math.max(step, minimum);
+    }
+    if (!allowDecimalTicks && !Number.isInteger(step)) {
+      step = Math.ceil(step);
+    }
+    return rawStep < 0 ? -step : step;
+  };
+
+  function computeAxisBounds(stat, options = {}) {
+    const debugLog = Array.isArray(options?.__debugCollector) ? options.__debugCollector : null;
+    const seriesList = Array.isArray(stat?.series) ? stat.series : [];
+    const desiredTickCountInput = Number(options.desiredTickCount);
+    const desiredTickCount = Number.isFinite(desiredTickCountInput)
+      ? Math.min(Math.max(desiredTickCountInput, 4), 12)
+      : 6;
+    const targetDivisions = Math.max(4, Math.min(12, desiredTickCount - 1));
+    const decimalCapOption = Number.isFinite(options.decimalCap)
+      ? Math.max(0, Math.min(options.decimalCap, 6))
+      : null;
+    const padFraction = Number.isFinite(options.padFraction)
+      ? Math.max(0, Math.min(options.padFraction, 0.4))
+      : (stat.isPercent ? 0.03 : 0.08);
+    const requestedMinInterval = Number.isFinite(options.minimumTickInterval)
+      ? Math.max(Math.abs(options.minimumTickInterval), Number.EPSILON)
+      : null;
+
+    const overrideMin = Number.isFinite(options.min) ? Number(options.min) : null;
+    const overrideMax = Number.isFinite(options.max) ? Number(options.max) : null;
+    const hasOverrideMin = overrideMin != null;
+    const hasOverrideMax = overrideMax != null;
+    const manualSegments = hasOverrideMin && hasOverrideMax && overrideMax > overrideMin
+      ? Math.min(Math.max(Number(options.manualDivisions) || (desiredTickCount - 1), 4), 16)
+      : null;
+
+    const rawExplicitMin = Number.isFinite(stat?.min) ? Number(stat.min) : null;
+    const rawExplicitMax = Number.isFinite(stat?.max) ? Number(stat.max) : null;
+    const metaExplicitMin = seriesList.reduce((acc, series) => {
+      const candidate = Number.isFinite(series?.meta?.min) ? Number(series.meta.min) : null;
+      if (candidate == null) return acc;
+      return acc == null ? candidate : Math.min(acc, candidate);
+    }, null);
+    const metaExplicitMax = seriesList.reduce((acc, series) => {
+      const candidate = Number.isFinite(series?.meta?.max) ? Number(series.meta.max) : null;
+      if (candidate == null) return acc;
+      return acc == null ? candidate : Math.max(acc, candidate);
+    }, null);
+    const explicitMinSource = rawExplicitMin != null ? rawExplicitMin : metaExplicitMin;
+    const explicitMaxSource = rawExplicitMax != null ? rawExplicitMax : metaExplicitMax;
+
+    const values = [];
+    let maxDecimalPrecision = 0;
+    seriesList.forEach((series) => {
+      const data = Array.isArray(series?.data) ? series.data : [];
+      data.forEach((value) => {
+        if (Number.isFinite(value)) {
+          values.push(value);
+          maxDecimalPrecision = Math.max(maxDecimalPrecision, countDecimals(value));
+        }
+      });
+    });
+
+  const ZERO_EPSILON = 1e-9;
+  const hasValues = values.length > 0;
+  const hasThousandths = hasValues && detectThousandths(values);
+  const percentWithinBounds = !!stat?.isPercent && (!hasValues || values.every((value) => value >= -ZERO_EPSILON && value <= 100 + ZERO_EPSILON));
+  const explicitRange = explicitMinSource != null && explicitMaxSource != null && explicitMaxSource > explicitMinSource
+    ? explicitMaxSource - explicitMinSource
+    : null;
+  const hasNegatives = hasValues && values.some((value) => value < -ZERO_EPSILON);
+    const hasPositives = hasValues && values.some((value) => value > ZERO_EPSILON);
+    const allZero = hasValues && !hasNegatives && !hasPositives;
+
+    let dataMin = hasValues ? Math.min(...values) : (stat.isPercent ? 0 : 0);
+    let dataMax = hasValues ? Math.max(...values) : (stat.isPercent ? 100 : 1);
+
+  const explicitMin = explicitMinSource != null && hasNegatives ? explicitMinSource : (explicitMinSource != null ? Math.max(0, explicitMinSource) : null);
+  const explicitMax = explicitMaxSource;
+  const boundMin = hasOverrideMin ? overrideMin : null;
+  const boundMax = hasOverrideMax ? overrideMax : null;
+  if (explicitMin != null) dataMin = Math.min(dataMin, explicitMin);
+  if (explicitMax != null) dataMax = Math.max(dataMax, explicitMax);
+    if (hasOverrideMin) dataMin = Math.min(dataMin, overrideMin);
+    if (hasOverrideMax) dataMax = Math.max(dataMax, overrideMax);
+
+  const percentHighCluster = percentWithinBounds && !hasNegatives && dataMin >= 90 && dataMax <= 100;
+    const percentHighClusterIntegers = percentHighCluster && maxDecimalPrecision === 0 && !hasThousandths;
+    if (percentHighClusterIntegers) {
+      dataMin = Math.min(dataMin, 70);
+      dataMax = Math.max(dataMax, 100);
+    }
+
+    if (allZero && !stat.isPercent) {
+      if (boundMin != null) {
+        dataMin = boundMin;
+      } else {
+        dataMin = 0;
+      }
+      if (boundMax != null) {
+        dataMax = boundMax;
+      } else if (!hasOverrideMin && !hasOverrideMax && explicitMax == null) {
+        dataMax = Math.max(dataMax, 15);
+      } else {
+        dataMax = Math.max(dataMax, dataMin === 0 ? 1 : dataMin + 1);
+      }
+    } else if (dataMin === dataMax) {
+      const lift = Math.max(Math.abs(dataMax || 1) * 0.25, stat.isPercent ? 1 : 0.5);
+      dataMin -= lift;
+      dataMax += lift;
+    }
+
+  let paddedMin = hasOverrideMin ? overrideMin : dataMin;
+  let paddedMax = hasOverrideMax ? overrideMax : dataMax;
+    const span = Math.max(paddedMax - paddedMin, Number.EPSILON);
+    let paddingValue = span * padFraction;
+    if (!Number.isFinite(paddingValue) || paddingValue <= ZERO_EPSILON) {
+      paddingValue = (stat.isPercent ? 1 : Math.max(Math.abs(paddedMax) || 1, 1)) * padFraction;
+    }
+
+  if ((!hasOverrideMin || !hasOverrideMax) && hasValues) {
+    const rawSpan = Math.max(Math.abs(dataMax - dataMin), Number.EPSILON);
+    if (Number.isFinite(rawSpan) && rawSpan > ZERO_EPSILON) {
+      const stepSeed = rawSpan / Math.max(targetDivisions, 1);
+      if (Number.isFinite(stepSeed) && stepSeed > ZERO_EPSILON) {
+        const padMultiplier = stat.isPercent ? 0.35 : 0.5;
+        const minimumPad = Math.max(stepSeed * padMultiplier, Number.EPSILON);
+        const cappedPad = (stat.isPercent && percentWithinBounds)
+          ? Math.min(minimumPad, 10)
+          : minimumPad;
+        paddingValue = Math.max(paddingValue, cappedPad);
+      }
+    }
+  }
+
+  const padBoost = span * (stat.isPercent ? 0.005 : 0.01);
+
+  if (!hasOverrideMin) paddedMin -= paddingValue + padBoost;
+  if (!hasOverrideMax) paddedMax += paddingValue + padBoost;
+
+
+    if (stat.isPercent && percentWithinBounds) {
+      paddedMin = Math.max(0, paddedMin);
+      paddedMax = Math.min(100, paddedMax);
+    } else if (!hasNegatives && !hasOverrideMin) {
+      paddedMin = Math.max(0, paddedMin);
+      if (!stat.isPercent && !hasOverrideMax) {
+        paddedMax = Math.max(paddedMax, paddedMin === 0 && allZero ? 15 : paddedMax);
+      }
+    }
+
+    if (allZero && !stat.isPercent && !hasOverrideMax && explicitMax == null) {
+      paddedMax = Math.max(paddedMax, 15);
+    }
+
+    if (paddedMax <= paddedMin) {
+      const adjustment = Math.max(Math.abs(paddedMin) || 1, 1);
+      paddedMax = paddedMin + adjustment;
+    }
+
+  const explicitSegment = explicitRange != null ? Math.abs(explicitRange) / Math.max(targetDivisions, 1) : null;
+  const overrideRange = hasOverrideMin && hasOverrideMax ? Math.abs(overrideMax - overrideMin) : null;
+      const explicitSegmentPrecision = Number.isFinite(explicitSegment) ? countDecimals(explicitSegment) : 0;
+      const explicitMinHasFraction = explicitMin != null && Math.abs(explicitMin - Math.round(explicitMin)) > ZERO_EPSILON;
+      const explicitMaxHasFraction = explicitMax != null && Math.abs(explicitMax - Math.round(explicitMax)) > ZERO_EPSILON;
+      const overrideMinHasFraction = hasOverrideMin && Math.abs(overrideMin - Math.round(overrideMin)) > ZERO_EPSILON;
+      const overrideMaxHasFraction = hasOverrideMax && Math.abs(overrideMax - Math.round(overrideMax)) > ZERO_EPSILON;
+      const overridePrecision = Math.max(
+        overrideMinHasFraction ? countDecimals(overrideMin) : 0,
+        overrideMaxHasFraction ? countDecimals(overrideMax) : 0
+      );
+      const fractionalEvidence = maxDecimalPrecision > 0
+          || explicitMinHasFraction
+          || explicitMaxHasFraction
+          || overrideMinHasFraction
+          || overrideMaxHasFraction
+          || hasThousandths;
+        const baseDecimalCap = stat.isPercent ? 2 : 4;
+        const autoDecimalCap = Math.min(6, Math.max(baseDecimalCap, maxDecimalPrecision, explicitSegmentPrecision, hasThousandths ? 3 : 0, overridePrecision));
+    let decimalCap = decimalCapOption != null ? decimalCapOption : autoDecimalCap;
+        const spanMagnitude = Math.abs(paddedMax - paddedMin);
+        const dominantMagnitude = Math.max(
+          Math.abs(paddedMin),
+          Math.abs(paddedMax),
+          Math.abs(dataMin),
+          Math.abs(dataMax)
+        );
+      const manualStepEstimate = manualSegments != null && Number.isFinite(overrideRange)
+        ? Math.abs(overrideRange) / Math.max(manualSegments, 1)
+        : null;
+      const estimatedAutoStep = Number.isFinite(spanMagnitude)
+        ? spanMagnitude / Math.max(targetDivisions, 1)
+        : null;
+      const allowFineDecimals = hasThousandths
+        || dominantMagnitude < 1 + ZERO_EPSILON
+        || spanMagnitude < 1 - ZERO_EPSILON
+        || (manualStepEstimate != null && manualStepEstimate < 1 - ZERO_EPSILON);
+        if (stat.isPercent) {
+          const percentMinDecimals = allowFineDecimals ? 2 : 0;
+          const percentMaxDecimals = allowFineDecimals ? 4 : 1;
+          if (manualStepEstimate != null && manualStepEstimate > ZERO_EPSILON && manualStepEstimate < 1 - ZERO_EPSILON) {
+            const manualStepDecimals = Math.max(0, countDecimals(manualStepEstimate));
+            const targetDecimals = Math.min(percentMaxDecimals, Math.max(percentMinDecimals, manualStepDecimals));
+            decimalCap = Math.max(decimalCap, targetDecimals);
+          }
+          decimalCap = clamp(decimalCap, percentMinDecimals, percentMaxDecimals);
+        } else if (!allowFineDecimals) {
+          decimalCap = Math.min(decimalCap, dominantMagnitude < 10 ? 2 : 1);
+        }
+      let allowDecimalTicks = fractionalEvidence
+        || (requestedMinInterval && requestedMinInterval < 1)
+        || (Number.isFinite(estimatedAutoStep) && estimatedAutoStep < 1 - ZERO_EPSILON)
+        || (Number.isFinite(manualStepEstimate) && manualStepEstimate < 1 - ZERO_EPSILON);
+      const spanToMagnitudeRatio = dominantMagnitude > ZERO_EPSILON
+        ? spanMagnitude / dominantMagnitude
+        : Number.POSITIVE_INFINITY;
+      if (!manualSegments
+        && !stat.isPercent
+        && !hasThousandths
+        && !fractionalEvidence
+        && dominantMagnitude >= 100 - ZERO_EPSILON
+        && spanToMagnitudeRatio < 0.05 - ZERO_EPSILON) {
+        allowDecimalTicks = false;
+      }
+    const baseMinimumTickInterval = allowDecimalTicks
+      ? Math.pow(10, -decimalCap)
+      : 1;
+    let minimumTickInterval = baseMinimumTickInterval;
+    if (requestedMinInterval != null) {
+      if (allowDecimalTicks) {
+        minimumTickInterval = Math.max(Number.EPSILON, Math.min(requestedMinInterval, baseMinimumTickInterval));
+      } else {
+        minimumTickInterval = Math.max(requestedMinInterval, baseMinimumTickInterval);
+      }
+    }
+
+    if (manualStepEstimate != null && manualStepEstimate > ZERO_EPSILON) {
+      minimumTickInterval = Math.min(minimumTickInterval, Math.max(manualStepEstimate, Number.EPSILON));
+    }
+
+    if (allowDecimalTicks) {
+      if (stat.isPercent) {
+        if (manualStepEstimate != null && manualStepEstimate > ZERO_EPSILON && manualStepEstimate < 0.1) {
+          minimumTickInterval = Math.max(Number.EPSILON, Math.min(minimumTickInterval, manualStepEstimate));
+        } else if (allowFineDecimals) {
+          minimumTickInterval = Math.max(minimumTickInterval, 0.1);
+        } else {
+          minimumTickInterval = Math.max(minimumTickInterval, 1);
+        }
+      } else if (!allowFineDecimals) {
+        minimumTickInterval = Math.max(minimumTickInterval, 0.1);
+      }
+    }
+
+    if (allowDecimalTicks && !stat.isPercent) {
+      minimumTickInterval = Math.max(minimumTickInterval, 0.01);
+    }
+
+    const computeNiceStep = (range, divisions) => {
+      const denominator = Math.max(divisions, 1);
+      const raw = range / denominator;
+      if (!Number.isFinite(raw) || raw <= 0) return minimumTickInterval;
+      return Math.max(raw, minimumTickInterval);
+    };
+
+    const snapStep = (value) => {
+      if (!Number.isFinite(value) || value <= 0) return minimumTickInterval;
+      const absValue = Math.max(Math.abs(value), minimumTickInterval);
+      const exponent = Math.floor(Math.log10(absValue));
+      const magnitude = Math.pow(10, exponent);
+      const baseDigits = allowDecimalTicks
+        ? [1, 1.25, 1.5, 2, 2.5, 3, 4, 5]
+        : [1, 2, 3, 4, 5];
+      const candidates = new Set();
+      baseDigits.forEach((digit) => {
+        candidates.add(digit * magnitude);
+        candidates.add(digit * magnitude * 10);
+        candidates.add(digit * magnitude / 10);
+      });
+      let snapped = null;
+      let bestDiff = Number.POSITIVE_INFINITY;
+      candidates.forEach((candidate) => {
+        if (!Number.isFinite(candidate)) return;
+        const adjusted = Math.max(candidate, minimumTickInterval);
+        const diff = Math.abs(adjusted - absValue);
+        if (diff < bestDiff - 1e-12 || (Math.abs(diff - bestDiff) <= 1e-12 && (snapped == null || adjusted < snapped))) {
+          bestDiff = diff;
+          snapped = adjusted;
+        }
+      });
+      if (snapped == null) snapped = Math.max(absValue, minimumTickInterval);
+      if (!allowDecimalTicks) {
+        snapped = Math.max(1, Math.round(snapped));
+      }
+      return Math.max(snapped, minimumTickInterval);
+    };
+
+    const MIN_AUTO_SEGMENTS = 4;
+    const MAX_AUTO_SEGMENTS = 15;
+    const preferredSegments = manualSegments
+      ? manualSegments
+      : Math.max(MIN_AUTO_SEGMENTS, Math.min(targetDivisions, MAX_AUTO_SEGMENTS));
+    const rangeForSteps = Math.max(paddedMax - paddedMin, minimumTickInterval);
+    const baseStepRaw = manualSegments
+      ? Math.max(Math.abs(overrideMax - overrideMin) / manualSegments, minimumTickInterval)
+      : rangeForSteps / Math.max(preferredSegments, 1);
+
+    const minimumSegments = manualSegments || MIN_AUTO_SEGMENTS;
+    const maximumSegments = manualSegments || MAX_AUTO_SEGMENTS;
+
+  const candidateSteps = new Set();
+    const addCandidateStep = (value, { snap = true } = {}) => {
+      if (!Number.isFinite(value)) return;
+      const baseValue = snap ? snapStep(value) : Math.max(value, minimumTickInterval);
+      const stepValue = allowDecimalTicks ? Math.max(baseValue, minimumTickInterval) : Math.max(1, Math.round(baseValue));
+      if (!Number.isFinite(stepValue) || stepValue <= 0) return;
+      const normalized = Number(stepValue.toPrecision(12));
+      if (normalized > 0) candidateSteps.add(normalized);
+      if (debugLog) debugLog.push({ phase: 'candidate', raw: value, snapped: normalized });
+    };
+
+    if (manualSegments) {
+      addCandidateStep(baseStepRaw, { snap: false });
+    } else {
+      const niceBase = snapStep(baseStepRaw);
+      addCandidateStep(niceBase);
+      addCandidateStep(baseStepRaw);
+
+      const clampSegments = (value) => Math.max(minimumSegments, Math.min(value, maximumSegments));
+      const segmentSeeds = new Set([
+        clampSegments(preferredSegments),
+        clampSegments(preferredSegments + 1),
+        clampSegments(preferredSegments - 1),
+        minimumSegments,
+        clampSegments(minimumSegments + 1),
+        clampSegments(minimumSegments + 2),
+        clampSegments(Math.round(preferredSegments * 1.5)),
+        clampSegments(Math.round(preferredSegments * 2))
+      ]);
+
+      if (explicitRange != null && explicitRange > 0) {
+        const explicitSegments = Math.max(1, Math.round(explicitRange / Math.max(minimumTickInterval, niceBase)));
+        segmentSeeds.add(clampSegments(explicitSegments));
+      }
+
+      segmentSeeds.forEach((segmentsCandidate) => {
+        if (!Number.isFinite(segmentsCandidate) || segmentsCandidate <= 0) return;
+        const raw = rangeForSteps / segmentsCandidate;
+        addCandidateStep(raw);
+      });
+
+      if (allowDecimalTicks) {
+        addCandidateStep(niceBase / 2);
+        addCandidateStep(niceBase / 5);
+        addCandidateStep(niceBase * 2);
+      } else {
+        addCandidateStep(niceBase * 2);
+        addCandidateStep(niceBase / 2);
+      }
+
+      addCandidateStep(minimumTickInterval);
+    }
+
+    if (boundMin != null && boundMax != null && boundMax > boundMin) {
+      for (let segmentsCandidate = minimumSegments; segmentsCandidate <= maximumSegments; segmentsCandidate += 1) {
+        const boundedStep = (boundMax - boundMin) / segmentsCandidate;
+        addCandidateStep(boundedStep);
+      }
+    }
+
+    const evaluateStep = (stepValue) => {
+      if (!Number.isFinite(stepValue) || stepValue <= 0) return null;
+      const step = allowDecimalTicks ? stepValue : Math.max(1, Math.round(stepValue));
+      const stepDecimals = allowDecimalTicks
+        ? Math.min(decimalCap, Math.max(countDecimals(step), maxDecimalPrecision, explicitSegmentPrecision, overridePrecision))
+        : 0;
+      const roundingFactor = Math.pow(10, stepDecimals);
+      const roundValue = (value) => Math.round(value * roundingFactor) / roundingFactor;
+      const floorToStep = (value) => roundValue(Math.floor((value + ZERO_EPSILON) / step) * step);
+      const ceilToStep = (value) => roundValue(Math.ceil((value - ZERO_EPSILON) / step) * step);
+
+      let axisMin = hasOverrideMin ? roundValue(overrideMin) : floorToStep(paddedMin);
+      let axisMax = hasOverrideMax ? roundValue(overrideMax) : ceilToStep(paddedMax);
+
+      if (manualSegments) {
+        axisMin = roundValue(overrideMin);
+        axisMax = roundValue(overrideMax);
+      }
+
+      if (stat.isPercent) {
+        axisMin = Math.max(0, axisMin);
+        if (percentWithinBounds) {
+          axisMax = Math.min(100, axisMax);
+        }
+      } else {
+        if (!hasNegatives && !hasOverrideMin) {
+          axisMin = Math.max(0, axisMin);
+        }
+        if (!hasNegatives && !hasOverrideMax) {
+          axisMax = Math.max(axisMax, 0);
+        }
+      }
+
+      if (!hasOverrideMin) axisMin = floorToStep(axisMin);
+      if (!hasOverrideMax) {
+        axisMax = ceilToStep(axisMax);
+        if (boundMax != null && dataMax <= boundMax + ZERO_EPSILON) {
+          axisMax = Math.min(axisMax, roundValue(boundMax));
+        }
+        if (stat.isPercent && percentWithinBounds && axisMax > 100 + 1e-9) {
+          let adjustedMax = axisMax;
+          while (adjustedMax > 100 + 1e-9 && adjustedMax - step >= paddedMax - 1e-9) {
+            adjustedMax = roundValue(adjustedMax - step);
+          }
+          if (adjustedMax > 100 + 1e-9) {
+            return null;
+          }
+          axisMax = Math.min(adjustedMax, 100);
+        }
+      }
+
+      if (boundMin != null && dataMin >= boundMin - ZERO_EPSILON) {
+        axisMin = Math.max(axisMin, roundValue(boundMin));
+      }
+      if (boundMax != null && dataMax <= boundMax + ZERO_EPSILON) {
+        axisMax = Math.min(axisMax, roundValue(boundMax));
+      }
+
+      if (axisMax <= axisMin) {
+        axisMax = roundValue(axisMin + step);
+      }
+
+      const spanStepCount = (axisMax - axisMin) / step;
+      if (!manualSegments && (spanStepCount <= 0 || Math.abs(spanStepCount - Math.round(spanStepCount)) > 1e-6)) {
+        return null;
+      }
+
+      if (!manualSegments) {
+        const desiredSpan = step * minimumSegments;
+        const canExtendBelowZero = hasNegatives || (stat.isPercent && !percentWithinBounds);
+        const lowerBound = hasOverrideMin
+          ? axisMin
+          : (boundMin != null ? roundValue(boundMin) : (canExtendBelowZero ? -Number.POSITIVE_INFINITY : 0));
+        const upperBound = hasOverrideMax
+          ? axisMax
+          : (boundMax != null ? roundValue(boundMax) : (stat.isPercent && percentWithinBounds ? 100 : Number.POSITIVE_INFINITY));
+        let guardExpand = 0;
+        while ((axisMax - axisMin) < (desiredSpan - 1e-9) && guardExpand < 128) {
+          let grew = false;
+          if (!hasOverrideMin && axisMin - step >= lowerBound - 1e-9) {
+            axisMin = roundValue(axisMin - step);
+            grew = true;
+          }
+          if ((axisMax - axisMin) >= (desiredSpan - 1e-9)) break;
+          if (!hasOverrideMax && axisMax + step <= upperBound + 1e-9) {
+            axisMax = roundValue(axisMax + step);
+            grew = true;
+          }
+          if (!grew) break;
+          guardExpand += 1;
+        }
+      }
+
+      const ticks = [];
+      let guard = 0;
+      let current = axisMin;
+      while (current <= axisMax + step * 0.5 && guard < 256) {
+        ticks.push(roundValue(current));
+        current = roundValue(current + step);
+        guard += 1;
+      }
+
+      if (!ticks.includes(axisMax)) ticks.push(roundValue(axisMax));
+      if (!ticks.includes(axisMin)) ticks.unshift(roundValue(axisMin));
+
+      let segments = ticks.length - 1;
+      if (manualSegments && segments > manualSegments) {
+        ticks.length = manualSegments + 1;
+        segments = manualSegments;
+      }
+
+      if (segments < minimumSegments || segments > maximumSegments) {
+        if (debugLog) debugLog.push({ phase: 'reject', reason: 'segment-count', step, segments, minimumSegments, maximumSegments });
+        return null;
+      }
+
+      const ensureAligned = (value) => {
+        if (!Number.isFinite(value)) return;
+        const normalized = roundValue(value);
+        const offset = Math.abs((normalized - ticks[0]) / step - Math.round((normalized - ticks[0]) / step));
+        if (offset > 1e-6) return;
+        if (ticks.includes(normalized)) return;
+
+        if (normalized > ticks[ticks.length - 1]) {
+          let cursor = roundValue(ticks[ticks.length - 1] + step);
+          let guardFill = 0;
+          while (cursor < normalized - step * 0.5 && guardFill < 128) {
+            ticks.push(cursor);
+            cursor = roundValue(cursor + step);
+            guardFill += 1;
+          }
+          ticks.push(normalized);
+          return;
+        }
+
+        if (normalized < ticks[0]) {
+          let cursor = roundValue(ticks[0] - step);
+          let guardFill = 0;
+          while (cursor > normalized + step * 0.5 && guardFill < 128) {
+            ticks.push(cursor);
+            cursor = roundValue(cursor - step);
+            guardFill += 1;
+          }
+          ticks.push(normalized);
+          return;
+        }
+
+        ticks.push(normalized);
+      };
+
+      if (ticks[0] <= 0 && ticks[ticks.length - 1] >= 0) ensureAligned(0);
+      if (stat.isPercent && percentWithinBounds) ensureAligned(100);
+      ensureAligned(explicitMin);
+      ensureAligned(explicitMax);
+
+      ticks.sort((a, b) => a - b);
+      const uniqueTicks = Array.from(new Set(ticks)).sort((a, b) => a - b);
+      const finalSegments = uniqueTicks.length - 1;
+
+      if (finalSegments < minimumSegments || finalSegments > maximumSegments) {
+        return null;
+      }
+
+      const finalMin = uniqueTicks[0];
+      const finalMax = uniqueTicks[uniqueTicks.length - 1];
+    const coverageLower = Math.max(0, paddedMin - finalMin);
+    const coverageUpper = Math.max(0, finalMax - paddedMax);
+    const softCoverageTarget = Math.max(paddingValue, minimumTickInterval || 0);
+    const coverageMissLower = !hasOverrideMin ? Math.max(0, softCoverageTarget - coverageLower) : 0;
+    const coverageMissUpper = !hasOverrideMax ? Math.max(0, softCoverageTarget - coverageUpper) : 0;
+  const segmentDiff = Math.abs(finalSegments - preferredSegments);
+    const stepDrift = Math.abs(step - baseStepRaw) / Math.max(step, baseStepRaw, 1);
+      const tickPrecision = uniqueTicks.reduce((acc, value) => Math.max(acc, countDecimals(value)), 0);
+      const stepPrecision = countDecimals(step);
+      const minIntervalPrecision = requestedMinInterval ? countDecimals(requestedMinInterval) : 0;
+      const precisionPool = [tickPrecision, stepPrecision, maxDecimalPrecision, overridePrecision, minIntervalPrecision];
+      if (Number.isFinite(explicitSegment) && Math.abs(explicitSegment - step) <= Math.max(Math.abs(step), Math.abs(explicitSegment)) * 1e-6) {
+        precisionPool.push(explicitSegmentPrecision);
+      }
+      const rawDisplayDecimals = allowDecimalTicks
+        ? Math.min(decimalCap, Math.max(...precisionPool))
+        : 0;
+      let displayDecimals = rawDisplayDecimals;
+      if (allowDecimalTicks) {
+        const axisStepLimit = step < 0.1 - ZERO_EPSILON ? 2 : 1;
+        displayDecimals = Math.min(displayDecimals, axisStepLimit);
+      }
+
+      const evenDivision = manualSegments
+        ? Math.abs(spanStepCount - manualSegments) < 1e-6
+        : Math.abs(spanStepCount - Math.round(spanStepCount)) < 1e-6;
+      const coveragePenalty = (coverageMissLower + coverageMissUpper) * 1.5e6;
+      const score = (segmentDiff * 2e6)
+        + ((coverageLower + coverageUpper) * 4e5)
+        + coveragePenalty
+        + (displayDecimals * 5e2)
+        + (stepDrift * 5e3)
+        + (evenDivision ? 0 : 1e7);
+
+      if (debugLog) {
+        debugLog.push({
+          phase: 'decimals',
+          step,
+          displayDecimals,
+          tickPrecision,
+          decimalCap,
+          maxDecimalPrecision,
+          explicitSegmentPrecision,
+          overridePrecision
+        });
+      }
+
+      const outcome = {
+        min: finalMin,
+        max: finalMax,
+        ticks: uniqueTicks,
+        decimals: rawDisplayDecimals,
+        displayDecimals,
+        allowDecimals: allowDecimalTicks,
+        score
+      };
+
+      if (debugLog) debugLog.push({ phase: 'accept', step, segments: finalSegments, min: finalMin, max: finalMax, score, coverageUpper, coverageLower });
+      return outcome;
+    };
+
+    let bestCandidate = null;
+    candidateSteps.forEach((stepValue) => {
+      const evaluated = evaluateStep(stepValue);
+      if (!evaluated) return;
+      if (!bestCandidate || evaluated.score < bestCandidate.score) {
+        bestCandidate = evaluated;
+      }
+    });
+
+    if (!bestCandidate) {
+      bestCandidate = evaluateStep(minimumTickInterval);
+    }
+
+    if (!bestCandidate) {
+      if (manualSegments && hasOverrideMin && hasOverrideMax) {
+        const manualSpan = Math.max(Math.abs(overrideMax - overrideMin), minimumTickInterval);
+        const manualStepRaw = manualSpan / Math.max(manualSegments, 1);
+        const manualStep = allowDecimalTicks
+          ? Math.max(manualStepRaw, minimumTickInterval)
+          : Math.max(1, Math.round(manualStepRaw));
+        let manualDecimals = allowDecimalTicks
+          ? Math.min(decimalCap, Math.max(countDecimals(manualStep), maxDecimalPrecision, explicitSegmentPrecision, overridePrecision))
+          : 0;
+        if (allowDecimalTicks) {
+          if (!allowFineDecimals) {
+            manualDecimals = Math.min(manualDecimals, stat.isPercent ? 1 : (dominantMagnitude < 10 ? 2 : 1));
+          } else if (stat.isPercent) {
+            manualDecimals = Math.min(manualDecimals, 1);
+          }
+        }
+        const roundingFactor = Math.pow(10, manualDecimals);
+        const roundValue = (value) => Math.round(value * roundingFactor) / roundingFactor;
+        const ticks = [];
+        for (let i = 0; i <= manualSegments; i += 1) {
+          const value = overrideMin + manualStep * i;
+          ticks.push(roundValue(value));
+        }
+        const uniqueTicks = Array.from(new Set(ticks)).sort((a, b) => a - b);
+        const finalMin = roundValue(Math.min(overrideMin, overrideMax));
+        const finalMax = roundValue(Math.max(overrideMin, overrideMax));
+
+        return {
+          min: uniqueTicks.length ? uniqueTicks[0] : finalMin,
+          max: uniqueTicks.length ? uniqueTicks[uniqueTicks.length - 1] : finalMax,
+          ticks: uniqueTicks.length ? uniqueTicks : [finalMin, finalMax],
+          decimals: manualDecimals,
+          displayDecimals: Math.min(manualDecimals, stat && stat.isPercent ? 1 : (dominantMagnitude < 10 ? 2 : manualDecimals)),
+          allowDecimals: allowDecimalTicks,
+          reversed: !!stat?.upsideDown
+        };
+      }
+
+      const fallbackMinSource = hasOverrideMin ? overrideMin : paddedMin;
+      const fallbackMaxSource = hasOverrideMax ? overrideMax : paddedMax;
+      const fallbackRange = Math.max(fallbackMaxSource - fallbackMinSource, minimumTickInterval);
+      const fallbackSegments = manualSegments || Math.max(MIN_AUTO_SEGMENTS, Math.min(preferredSegments, MAX_AUTO_SEGMENTS));
+      const fallbackStepRaw = fallbackRange / Math.max(fallbackSegments, 1);
+      const fallbackStep = allowDecimalTicks ? snapStep(fallbackStepRaw) : Math.max(1, Math.round(fallbackStepRaw));
+      let fallbackDecimals = allowDecimalTicks
+        ? Math.min(decimalCap, Math.max(countDecimals(fallbackStep), maxDecimalPrecision, explicitSegmentPrecision, overridePrecision))
+        : 0;
+      if (allowDecimalTicks) {
+        if (!allowFineDecimals) {
+          fallbackDecimals = Math.min(fallbackDecimals, stat.isPercent ? 1 : (dominantMagnitude < 10 ? 2 : 1));
+        } else if (stat.isPercent) {
+          fallbackDecimals = Math.min(fallbackDecimals, 1);
+        }
+      }
+      const roundingFactor = Math.pow(10, fallbackDecimals);
+      const roundValue = (value) => Math.round(value * roundingFactor) / roundingFactor;
+
+      let axisMin = hasOverrideMin
+        ? roundValue(overrideMin)
+        : roundValue(Math.floor((fallbackMinSource + ZERO_EPSILON) / fallbackStep) * fallbackStep);
+      let axisMax = hasOverrideMax
+        ? roundValue(overrideMax)
+        : roundValue(Math.ceil((fallbackMaxSource - ZERO_EPSILON) / fallbackStep) * fallbackStep);
+
+      if (stat.isPercent && percentWithinBounds) {
+        axisMin = Math.max(0, axisMin);
+        axisMax = Math.min(100, axisMax);
+      } else if (!hasNegatives && !hasOverrideMin) {
+        axisMin = Math.max(0, axisMin);
+      }
+
+      if (boundMin != null && dataMin >= boundMin - ZERO_EPSILON) {
+        axisMin = Math.max(axisMin, roundValue(boundMin));
+      }
+      if (boundMax != null && dataMax <= boundMax + ZERO_EPSILON) {
+        axisMax = Math.min(axisMax, roundValue(boundMax));
+      }
+
+      if (axisMax <= axisMin) {
+        axisMax = roundValue(axisMin + fallbackStep);
+      }
+
+      const ticks = [];
+      let guard = 0;
+      let cursor = axisMin;
+      while (cursor <= axisMax + fallbackStep * 0.5 && guard < 256) {
+        ticks.push(roundValue(cursor));
+        cursor += fallbackStep;
+        guard += 1;
+      }
+      if (!ticks.includes(axisMax)) {
+        ticks.push(axisMax);
+      }
+
+      const uniqueTicks = Array.from(new Set(ticks)).sort((a, b) => a - b);
+      const targetSegments = manualSegments || MIN_AUTO_SEGMENTS;
+      while (uniqueTicks.length - 1 < targetSegments) {
+        const last = uniqueTicks[uniqueTicks.length - 1];
+        const nextTick = roundValue(last + fallbackStep);
+        if (uniqueTicks.includes(nextTick)) {
+          break;
+        }
+        uniqueTicks.push(nextTick);
+      }
+
+      return {
+        min: uniqueTicks[0],
+        max: uniqueTicks[uniqueTicks.length - 1],
+        ticks: uniqueTicks,
+        decimals: fallbackDecimals,
+        displayDecimals: Math.min(fallbackDecimals, stat && stat.isPercent ? 1 : (dominantMagnitude < 10 ? 2 : fallbackDecimals)),
+        allowDecimals: allowDecimalTicks,
+        reversed: !!stat?.upsideDown
+      };
+    }
+
+    return {
+      min: bestCandidate.min,
+      max: bestCandidate.max,
+      ticks: bestCandidate.ticks,
+      decimals: bestCandidate.decimals,
+      displayDecimals: bestCandidate.displayDecimals != null ? bestCandidate.displayDecimals : bestCandidate.decimals,
+      allowDecimals: allowDecimalTicks,
+      reversed: !!stat?.upsideDown
+    };
+  }
+
+  function ensureHalo(chart) {
+    try {
+      const defs = chart.renderer.defs && chart.renderer.defs.element;
+      if (defs && !defs.querySelector('#softWhiteHalo')) {
+        defs.innerHTML += '<filter id="softWhiteHalo" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>';
+      }
+    } catch (e) {
+      /* noop */
+    }
+  }
+
+  function enhanceLabels(chart) {
+    if (!chart || !chart.series) return;
+    (chart.series || []).forEach((series) => {
+      if (!series || !series.points) return;
+      series.points.forEach((point) => {
+        const dataLabel = point && point.dataLabel;
+        if (!dataLabel || typeof dataLabel.css !== 'function') return;
+        dataLabel.css({ filter: 'none', textOutline: '', fontWeight: '', color: '' });
+      });
+    });
+  }
+
+  function installDroplines(chart) {
+    if (!chart) return;
+    const storeKey = '_droplineGraphics';
+    const existing = chart[storeKey];
+    if (Array.isArray(existing)) {
+      existing.forEach((graphic) => {
+        try {
+          if (graphic && typeof graphic.destroy === 'function') {
+            graphic.destroy();
+          }
+        } catch (e) {
+          /* noop */
+        }
+      });
+    }
+    chart[storeKey] = [];
+  }
+  function installHighchartsHooks(Highcharts) {
+    if (!Highcharts || Highcharts.__bookletHooksInstalled) return;
+    Highcharts.__bookletHooksInstalled = true;
+
+    const defaultLabelLift = Math.round(0.45 * CM_TO_PX) + Math.round(0.3 * CM_TO_PX);
+    const defaultLabelFormatter = function defaultLabelFormatter() {
+      const rawValue = this && this.y;
+      if (!Number.isFinite(rawValue)) {
+        return '';
+      }
+      const orientation = (this.point && this.point.custom && this.point.custom.labelOrientation) === 'below'
+        ? 'below'
+        : 'above';
+      const orientationClass = orientation === 'below' ? 'is-below' : 'is-above';
+      const decimals = Math.min(2, Math.max(0, countDecimals(rawValue)));
+      const formatted = Highcharts.numberFormat(rawValue, decimals);
+      const safeText = escapeHtml(formatted);
+      const labelHtml = '<span class="highcharts-data-label-custom ' + orientationClass + '" style="--label-lift:' + defaultLabelLift + 'px">' +
+        '<span class="highcharts-data-label-text">' + safeText + '</span>' +
+        '<span class="highcharts-data-label-tick" aria-hidden="true"></span>' +
+        '</span>';
+      const metaStore = this.point ? (this.point.__bookletLabelMeta || (this.point.__bookletLabelMeta = {})) : null;
+      if (metaStore) {
+        metaStore.labelHTML = labelHtml;
+      }
+      if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+        console.log('Formatter output:', labelHtml);
+      }
+      return labelHtml;
+    };
+
+    Highcharts.setOptions({
+      accessibility: { enabled: false },
+      plotOptions: {
+        series: {
+          dataLabels: {
+            enabled: true,
+            useHTML: true,
+            textPath: null,
+            align: 'center',
+            verticalAlign: 'top',
+            y: 0,
+            padding: 0,
+            borderWidth: 0,
+            shadow: false,
+            backgroundColor: 'transparent',
+            inside: false,
+            allowOverlap: false,
+            crop: false,
+            overflow: 'allow',
+            className: 'highcharts-data-label-wrapper',
+            zIndex: 5,
+            style: {
+              color: '#0f172a',
+              textOutline: 'none',
+              fontWeight: '600',
+              fontSize: '11px',
+              whiteSpace: 'nowrap'
+            },
+            formatter: defaultLabelFormatter
+          }
+        }
+      }
+    });
+
+    // === FORCE CUSTOM HTML LABELS ALWAYS ENABLED ===
+(function enforceHtmlLabels() {
+    if (!window.Highcharts) return;
+
+    const oldChart = Highcharts.chart;
+
+  Highcharts.chart = function (container, options, callback) {
+    const normalizeDataLabels = (input) => {
+      if (Array.isArray(input)) {
+        return input.map((entry) => normalizeDataLabels(entry));
+      }
+      const base = (input && typeof input === 'object') ? { ...input } : {};
+      base.enabled = base.enabled !== false;
+      base.useHTML = true;
+      base.className = base.className || 'highcharts-data-label-wrapper';
+      base.align = base.align || 'center';
+      base.verticalAlign = base.verticalAlign || 'top';
+  if (base.y == null) base.y = 0;
+      if (base.padding == null) base.padding = 0;
+      if (base.borderWidth == null) base.borderWidth = 0;
+      if (base.shadow == null) base.shadow = false;
+      if (base.backgroundColor == null) base.backgroundColor = 'transparent';
+      if (base.allowOverlap == null) base.allowOverlap = false;
+      if (base.crop == null) base.crop = false;
+      if (base.overflow == null) base.overflow = 'allow';
+      const style = base.style && typeof base.style === 'object' ? { ...base.style } : {};
+      if (style.color == null) style.color = '#0f172a';
+      if (style.fontWeight == null) style.fontWeight = '600';
+      if (style.fontSize == null) style.fontSize = '11px';
+      if (style.whiteSpace == null) style.whiteSpace = 'nowrap';
+      base.style = style;
+      return base;
+    };
+
+    const normalizeSeriesCollection = (seriesCollection) => {
+      if (!Array.isArray(seriesCollection)) return seriesCollection;
+      return seriesCollection.map((seriesCfg) => {
+        if (!seriesCfg || typeof seriesCfg !== 'object') {
+          return seriesCfg;
+        }
+        if (seriesCfg.dataLabels != null) {
+          seriesCfg.dataLabels = normalizeDataLabels(seriesCfg.dataLabels);
+        }
+        return seriesCfg;
+      });
+    };
+
+    options = options || {};
+    options.plotOptions = options.plotOptions || {};
+    options.plotOptions.series = options.plotOptions.series || {};
+    options.plotOptions.series.dataLabels = normalizeDataLabels(options.plotOptions.series.dataLabels);
+    options.series = normalizeSeriesCollection(options.series);
+
+    return oldChart.call(this, container, options, callback);
+  };
+})();
+
+
+    Highcharts.addEvent(Highcharts.Series, 'afterRender', function () {
+      if (!this.points) return;
+      this.points.forEach((point) => {
+        const label = point && point.dataLabel;
+        if (!label) return;
+        if (!Number.isFinite(point?.y) || !Number.isFinite(point?.plotY)) {
+          try { label.hide(); } catch (e) { /* noop */ }
+        }
+      });
+    });
+
+    Highcharts.addEvent(Highcharts.Series, 'afterDrawDataLabels', function () {
+      if (!this.points) return;
+      this.points.forEach((point) => {
+        const label = point && point.dataLabel;
+        const meta = point && point.__bookletLabelMeta;
+        if (!label || !meta) {
+          if (label && label.__bookletLastOffset && label.alignAttr) {
+            const currentY = Number.isFinite(label.alignAttr.y) ? label.alignAttr.y : 0;
+            const baseY = currentY - label.__bookletLastOffset;
+            label.__bookletLastOffset = 0;
+            label.attr({ y: baseY });
+            if (label.div && typeof label.div.style === 'object') {
+              label.div.style.top = `${Math.round(baseY)}px`;
+            }
+          }
+          return;
+        }
+        const rawTickLength = Number(meta.tickLength);
+        const tickLength = Number.isFinite(rawTickLength) ? rawTickLength : 0;
+        const rawOffset = Number(meta.labelOffset);
+        const offset = Number.isFinite(rawOffset) ? rawOffset : 0;
+        const desiredOffsetRaw = (meta.orientation === 'below' ? 1 : -1) * Math.round(offset + Math.max(tickLength * 0.65, 0));
+        const desiredOffset = Number.isFinite(desiredOffsetRaw) ? desiredOffsetRaw : 0;
+        const alignAttr = label.alignAttr || {};
+        const currentY = Number.isFinite(alignAttr.y) ? alignAttr.y : 0;
+        const lastOffset = Number.isFinite(label.__bookletLastOffset) ? label.__bookletLastOffset : 0;
+        const baseYRaw = currentY - lastOffset;
+        const baseY = Number.isFinite(baseYRaw) ? baseYRaw : 0;
+        if (Number.isFinite(desiredOffset) && desiredOffset === lastOffset) return;
+        const newYRaw = baseY + desiredOffset;
+        if (!Number.isFinite(newYRaw)) {
+          label.__bookletLastOffset = 0;
+          return;
+        }
+        const newY = newYRaw;
+        label.__bookletLastOffset = desiredOffset;
+        label.attr({ y: newY });
+        if (label.div && typeof label.div.style === 'object') {
+          label.div.style.top = `${Math.round(newY)}px`;
+        }
+      });
+    });
+  }
+
+  if (typeof w.Highcharts !== 'undefined') {
+    installHighchartsHooks(w.Highcharts);
+    applyHighchartsNaNBlocker(w.Highcharts);
+    installHighchartsChartSanitizer(w.Highcharts);
+  } else if (typeof document !== 'undefined') {
+    let attempts = 0;
+    const maxAttempts = 200;
+    const timer = setInterval(() => {
+      if (typeof w.Highcharts !== 'undefined') {
+        clearInterval(timer);
+        installHighchartsHooks(w.Highcharts);
+        applyHighchartsNaNBlocker(w.Highcharts);
+        installHighchartsChartSanitizer(w.Highcharts);
+      } else if (++attempts >= maxAttempts) {
+        clearInterval(timer);
+      }
+    }, 25);
+  }
+
+  w.computeAxisBounds = computeAxisBounds;
+  if (typeof globalThis === 'object' && globalThis) {
+    if (typeof globalThis.computeAxisBounds !== 'function') {
+      globalThis.computeAxisBounds = computeAxisBounds;
+    }
+    if (typeof globalThis.roundToDecimals !== 'function') {
+      globalThis.roundToDecimals = roundToDecimals;
+    }
+    if (typeof globalThis.niceStep !== 'function') {
+      globalThis.niceStep = niceStep;
+    }
+  }
+
+})(window);
+
+
+/* ===== Injected: Per-chart scale UI (modal inside container) & CSV-load spinner ===== */
+(function(){
+  'use strict';
+  if (typeof Highcharts === 'undefined') return;
+
+  function ensureStyles() {
+    if (document.getElementById('hc-scale-ui-styles')) return;
+    const css = `
+      .scale-btn{position:absolute;top:8px;right:8px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;opacity:0;transition:opacity .25s ease,background .2s ease}
+      .scale-btn.show{opacity:1}
+      .scale-btn:hover{background:rgba(0,0,0,.85)}
+      .hc-loading-overlay{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:20}
+      .hc-loading-overlay.show{display:flex}
+      .hc-toast-container{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:1080}
+      .hc-chart-modal .modal-dialog{max-width:720px;margin:1.75rem auto}
+  .hc-chart-modal .modal-content{display:flex;flex-direction:column;background:linear-gradient(160deg,rgba(11,18,32,0.95),rgba(15,23,42,0.92));color:#f8fafc;border-radius:1.1rem;border:1px solid rgba(148,163,184,0.2);box-shadow:0 32px 72px rgba(15,23,42,0.6)}
+  .hc-chart-modal .modal-header,.hc-chart-modal .modal-footer{border-color:rgba(148,163,184,0.18);padding-inline:1.5rem}
+      .hc-chart-modal .modal-title{font-size:1.05rem;font-weight:600;letter-spacing:.06em}
+  .hc-chart-modal .modal-body{flex:1 1 auto;max-height:65vh;overflow-y:auto;padding:1.15rem 1.5rem}
+      .hc-axis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1.15rem;padding:0;margin:0}
+      .axis-block{list-style:none;margin:0}
+  .hc-axis-card{background:linear-gradient(150deg,rgba(24,34,56,0.88),rgba(14,22,38,0.92));border:1px solid rgba(148,163,184,0.32);border-radius:.95rem;padding:1rem 1.15rem;box-shadow:0 18px 38px -24px rgba(15,23,42,0.9);transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease}
+  .hc-axis-card:hover{transform:translateY(-2px);box-shadow:0 24px 48px -20px rgba(94,234,212,0.32)}
+      .hc-axis-card.has-custom{border-color:#38bdf8;box-shadow:0 0 0 2px rgba(56,189,248,0.28),0 24px 54px -24px rgba(56,189,248,0.35)}
+      .hc-axis-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:.85rem}
+      .hc-axis-title{font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:#dbeafe}
+  .hc-axis-series{font-size:.78rem;color:rgba(226,232,240,0.85);margin-top:.25rem;word-break:break-word}
+  .hc-axis-status{font-size:.7rem;font-weight:600;color:#fde68a;text-transform:uppercase;letter-spacing:.1em;margin-top:.15rem}
+  .hc-axis-card-body .input-group-text{background:rgba(34,45,68,0.94);color:#f1f5f9;border:none;font-weight:600}
+  .hc-axis-card-body .form-control{background:rgba(15,23,42,0.6);color:#f8fafc;border:1px solid rgba(148,163,184,0.25)}
+  .hc-axis-card-body .form-control:focus{border-color:#38bdf8;box-shadow:0 0 0 .18rem rgba(56,189,248,0.25)}
+      .hc-axis-card-body label{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:rgba(203,213,225,0.85);font-weight:600}
+      .hc-axis-meta{font-size:.74rem;color:rgba(226,232,240,0.7);margin-top:.9rem;display:flex;flex-direction:column;gap:.3rem}
+      .hc-axis-meta strong{color:#f8fafc;font-weight:600}
+      .hc-modal-footer-controls{display:flex;flex-wrap:wrap;gap:.65rem;align-items:center;width:100%}
+      .hc-modal-footer-controls .form-check{padding-left:2.2rem}
+      .hc-axis-card input::-webkit-outer-spin-button,.hc-axis-card input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+      .hc-axis-card input[type=number]{-moz-appearance:textfield}
+      @media (max-width:768px){.hc-axis-grid{grid-template-columns:1fr}}
+      @media (max-width:576px){
+        .hc-chart-modal .modal-dialog{margin:1rem auto;max-width:calc(100% - 2rem)}
+        .hc-axis-card{padding:1rem}
+      }
+      @media print{
+        .scale-btn,.modal,.hc-loading-overlay,.hc-toast-container,.nice-scaling-overlay,.chart-scale-btn{display:none!important}
+        .highcharts-root{shape-rendering:geometricPrecision;text-rendering:optimizeLegibility}
+        .highcharts-container svg{max-width:100%!important}
+      }
+    `;
+    const style = document.createElement('style');
+    style.id = 'hc-scale-ui-styles';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  function ensureSpinner(chart) {
+    const wrap = chart && chart.renderTo; if (!wrap) return null;
+    let overlay = wrap.querySelector('.hc-loading-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'hc-loading-overlay';
+      overlay.innerHTML = `<div class="spinner-border text-dark" role="status" aria-label="Loading"></div>`;
+      if (!wrap.style.position) wrap.style.position = 'relative';
+      wrap.appendChild(overlay);
+    }
+    return overlay;
+  }
+  function showSpinner(chart){ const ov=ensureSpinner(chart); if(ov) ov.classList.add('show'); }
+  function hideSpinner(chart){ const ov=ensureSpinner(chart); if(ov) ov.classList.remove('show'); }
+
+  function ensureToast() {
+    if (document.getElementById('hc-scale-toast')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'hc-toast-container';
+    wrap.innerHTML = `
+      <div id="hc-scale-toast" class="toast align-items-center text-body bg-white border-0 shadow rounded-3" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="1800">
+        <div class="d-flex">
+          <div id="hc-scale-toast-body" class="toast-body fw-medium">Scale updated ✓</div>
+          <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+  }
+
+  const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c]));
+
+  function showToast(message) {
+    ensureToast();
+    const el = document.getElementById('hc-scale-toast');
+    const body = document.getElementById('hc-scale-toast-body');
+    if (body) body.textContent = message;
+    if (window.bootstrap && window.bootstrap.Toast) {
+      const toast = bootstrap.Toast.getOrCreateInstance(el, { delay: 1800, autohide: true, animation: true });
+      toast.show();
+    } else {
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 1800);
+    }
+  }
+
+  // CSV-load spinner only: show when user selects a CSV file input
+  document.addEventListener('change', function(e){
+    const t = e.target;
+    if (t && t.type === 'file' && /csv/i.test(t.accept || t.getAttribute('accept') || 'csv')) {
+      (Highcharts.charts || []).forEach(c => c && showSpinner(c));
+      const once = (evChart)=>{
+        hideSpinner(evChart);
+        Highcharts.removeEvent(evChart, 'load', once);
+      };
+      (Highcharts.charts || []).forEach(c => c && Highcharts.addEvent(c, 'load', function(){ once(this); }));
+    }
+  }, true);
+
+  function ensureModalIn(chart) {
+    const host = chart && chart.renderTo; if (!host) return null;
+    if (!host.style.position || host.style.position === 'static') host.style.position = 'relative';
+    host.style.overflow = 'visible';
+    let modalId = host.dataset.scaleModalId;
+    if (!modalId) {
+      const base = host.id || `hc-chart-${typeof chart.index === 'number' ? chart.index : Date.now()}`;
+      modalId = `${base}-scale-modal`;
+      host.dataset.scaleModalId = modalId;
+    }
+    let modalWrap = document.getElementById(modalId);
+    if (!modalWrap) {
+      modalWrap = document.createElement('div');
+      modalWrap.className = 'modal fade hc-chart-modal';
+      modalWrap.id = modalId;
+      modalWrap.tabIndex = -1;
+      modalWrap.setAttribute('aria-hidden','true');
+      modalWrap.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+          <div class="modal-content">
+            <div class="modal-header border-secondary">
+              <h5 class="modal-title">Adjust Chart Scales</h5>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <form id="hc-scale-form"><div id="hc-scale-fields" class="hc-axis-grid"></div></form>
+            </div>
+            <div class="modal-footer border-secondary flex-wrap gap-2 hc-modal-footer-controls">
+              <div class="form-check form-switch text-light me-auto">
+                <input class="form-check-input" type="checkbox" role="switch" id="hc-scale-auto">
+                <label class="form-check-label small" for="hc-scale-auto">Auto apply</label>
+              </div>
+              <button type="button" class="btn btn-outline-light rounded-pill" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-outline-info rounded-pill" id="hc-scale-reset">Reset to Auto</button>
+              <button type="button" class="btn btn-primary rounded-pill" id="hc-scale-apply">Apply &amp; Close</button>
+            </div>
+          </div>
+        </div>`;
+      document.body.appendChild(modalWrap);
+    }
+    return modalWrap;
+  }
+
+  function closeScaleModal(modalEl){
+    if (!modalEl) return;
+    if (window.bootstrap && window.bootstrap.Modal) {
+      bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+    } else {
+      modalEl.classList.remove('show');
+      modalEl.style.display = 'none';
+      modalEl.setAttribute('aria-hidden','true');
+      modalEl.removeAttribute('aria-modal');
+    }
+  }
+
+  function showScaleModal(modalEl){
+    if (!modalEl) return;
+    if (window.bootstrap && window.bootstrap.Modal) {
+      bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop:true, keyboard:true }).show();
+    } else {
+      modalEl.classList.add('show');
+      modalEl.style.display = 'block';
+      modalEl.setAttribute('aria-modal','true');
+      modalEl.removeAttribute('aria-hidden');
+    }
+  }
+
+  function invokeChartDecorators(chart){
+    if (!chart) return;
+    const flush = () => {
+      try {
+        if (window.Highcharts && typeof window.Highcharts.fireEvent === 'function') {
+          window.Highcharts.fireEvent(chart, 'render');
+        } else if (typeof chart.render === 'function') {
+          chart.render();
+        }
+      } catch (err) {
+        /* noop */
+      }
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      requestAnimationFrame(flush);
+    } else {
+      setTimeout(flush, 16);
+    }
+  }
+
+  function openModal(chart) {
+    const modalEl = ensureModalIn(chart);
+    if (!modalEl) return;
+    const fields = modalEl.querySelector('#hc-scale-fields');
+    if (!fields) return;
+
+    const state = chart._axisModalState || (chart._axisModalState = { autoApply:false, overrides:{} });
+    const names = ['Primary','Secondary','Tertiary','Quaternary'];
+    const fmt = (val) => Number.isFinite(val)
+      ? (Math.abs(val) >= 1000 ? val.toFixed(0)
+        : Math.abs(val) >= 100 ? val.toFixed(1)
+        : Math.abs(val) >= 10 ? val.toFixed(2)
+        : Math.abs(val) >= 1 ? val.toFixed(3)
+        : val.toPrecision(3))
+      : 'auto';
+
+    const formatInput = (val) => {
+      if (!Number.isFinite(val)) return '';
+      const abs = Math.abs(val);
+      if (abs >= 10000) return val.toFixed(0);
+      if (abs >= 100) return val.toFixed(2);
+      if (abs >= 10) return val.toFixed(3);
+      return val.toString();
+    };
+
+    const axisSeries = (axis) => (chart.series || []).filter((s) => (s.yAxis || chart.yAxis[0]) === axis);
+
+  fields.innerHTML = '';
+  fields.className = 'nice-scaling-axis-grid';
+    const axisBlocks = [];
+
+    const rawAxes = Array.isArray(chart.yAxis) ? chart.yAxis : [];
+    const seriesOrigins = Array.isArray(chart.__seriesOrigins)
+      ? chart.__seriesOrigins.slice(0, names.length)
+      : (chart.series || []).map((_, idx) => idx).slice(0, names.length);
+    const requestedAxisIndices = new Set([0]);
+    seriesOrigins.forEach((originIdx) => {
+      if (!Number.isFinite(originIdx)) return;
+      requestedAxisIndices.add(Math.max(0, Math.min(originIdx, rawAxes.length - 1)));
+    });
+    Object.keys(state.overrides || {}).forEach((key) => {
+      const axisIdx = Number(key);
+      if (Number.isFinite(axisIdx)) requestedAxisIndices.add(Math.max(0, Math.min(axisIdx, rawAxes.length - 1)));
+    });
+
+    const axisDescriptors = Array.from(requestedAxisIndices)
+      .sort((a, b) => a - b)
+      .filter((idx) => rawAxes[idx])
+      .slice(0, names.length)
+      .map((idx) => {
+        const axis = rawAxes[idx];
+        const override = state.overrides[idx] || {};
+        const seriesForThisAxis = axisSeries(axis);
+        const hasCustom = override && (override.min != null || override.max != null);
+        return { axis, idx, override, seriesForThisAxis, hasCustom };
+      });
+
+    if (!axisDescriptors.length && rawAxes[0]) {
+      const axis = rawAxes[0];
+      const override = state.overrides[0] || {};
+      axisDescriptors.push({
+        axis,
+        idx: 0,
+        override,
+        seriesForThisAxis: axisSeries(axis),
+        hasCustom: override && (override.min != null || override.max != null)
+      });
+    }
+
+    axisDescriptors.forEach(({ axis, idx, override, seriesForThisAxis, hasCustom }) => {
+      const ex = axis && axis.getExtremes ? axis.getExtremes() : {};
+      const seriesLabel = seriesForThisAxis.length
+        ? seriesForThisAxis.map((s) => escapeHtml(s?.name || `Series ${Number.isFinite(s.index) ? s.index + 1 : ''}`.trim())).join(', ')
+        : 'No series attached';
+      const appliedMin = Object.prototype.hasOwnProperty.call(override, 'min') ? override.min
+        : (Number.isFinite(axis?.options?.min) ? axis.options.min
+          : Number.isFinite(axis?.userMin) ? axis.userMin : null);
+      const appliedMax = Object.prototype.hasOwnProperty.call(override, 'max') ? override.max
+        : (Number.isFinite(axis?.options?.max) ? axis.options.max
+          : Number.isFinite(axis?.userMax) ? axis.userMax : null);
+      const statusLabel = hasCustom ? 'Custom' : 'Auto';
+
+      const block = document.createElement('div');
+      block.className = 'nice-scaling-axis';
+      block.dataset.axisIndex = idx;
+      block.innerHTML = `
+        <div class="nice-scaling-axis-header">
+          <div>
+            <div class="axis-label">${names[idx] || ('Axis ' + (idx + 1))}</div>
+            <div class="axis-range">Current range: <strong data-axis-current-min>${fmt(ex?.min)}</strong> – <strong data-axis-current-max>${fmt(ex?.max)}</strong></div>
+            <div class="axis-series">${seriesLabel}</div>
+          </div>
+          <span class="scale-chip${hasCustom ? ' is-custom' : ''}" data-axis-status>${statusLabel}</span>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label class="form-label" for="axis${idx}_min">Minimum</label>
+            <input type="number" step="any" class="axis-min" id="axis${idx}_min" value="${appliedMin != null ? formatInput(appliedMin) : ''}" placeholder="Auto" />
+          </div>
+          <div class="field">
+            <label class="form-label" for="axis${idx}_max">Maximum</label>
+            <input type="number" step="any" class="axis-max" id="axis${idx}_max" value="${appliedMax != null ? formatInput(appliedMax) : ''}" placeholder="Auto" />
+          </div>
+        </div>
+        <div class="axis-meta">
+          <div>Data span: <strong data-axis-data-min>${fmt(ex?.dataMin)}</strong> – <strong data-axis-data-max>${fmt(ex?.dataMax)}</strong></div>
+          <div>${idx === 0 ? 'Primary axis stays visible to readers.' : 'Overrides move its series to a private scale.'}</div>
+        </div>`;
+      fields.appendChild(block);
+      axisBlocks.push(block);
+      if (hasCustom) block.classList.add('has-custom');
+    });
+    const applyBtn = modalEl.querySelector('#hc-scale-apply');
+    const resetBtn = modalEl.querySelector('#hc-scale-reset');
+    const autoToggle = modalEl.querySelector('#hc-scale-auto');
+  const dismissBtns = modalEl.querySelectorAll('[data-bs-dismiss="modal"]');
+
+    const parseField = (input) => {
+      if (!input) return null;
+      const raw = String(input.value || '').trim();
+      if (raw === '') return null;
+      const val = parseFloat(raw);
+      return Number.isFinite(val) ? val : null;
+    };
+
+    const refreshSummaries = () => {
+      axisBlocks.forEach(block => {
+        const idx = Number(block.dataset.axisIndex);
+        const axis = chart.yAxis[idx];
+        if (!axis) return;
+        const ex = axis.getExtremes ? axis.getExtremes() : {};
+        const minMarker = block.querySelector('[data-axis-current-min]');
+        const maxMarker = block.querySelector('[data-axis-current-max]');
+        if (minMarker) minMarker.textContent = fmt(ex?.min);
+        if (maxMarker) maxMarker.textContent = fmt(ex?.max);
+        const dataMinMarker = block.querySelector('[data-axis-data-min]');
+        const dataMaxMarker = block.querySelector('[data-axis-data-max]');
+        if (dataMinMarker) dataMinMarker.textContent = fmt(ex?.dataMin);
+        if (dataMaxMarker) dataMaxMarker.textContent = fmt(ex?.dataMax);
+      });
+    };
+
+    const updateCustomMarkers = () => {
+      axisBlocks.forEach(block => {
+        const idx = Number(block.dataset.axisIndex);
+        const override = state.overrides[idx];
+        const active = !!override && (override.min != null || override.max != null);
+        const card = block.querySelector('.hc-axis-card');
+        const statusEl = block.querySelector('[data-axis-status]');
+        if (card) {
+          card.classList.toggle('has-custom', active);
+        }
+        block.classList.toggle('has-custom', active);
+        if (statusEl) {
+          statusEl.textContent = active ? 'Custom scale' : 'Auto scale';
+          statusEl.style.color = active ? '#38bdf8' : '#facc15';
+        }
+      });
+    };
+
+    const applyScale = ({ autoTrigger = false, closeAfter = false } = {}) => {
+      axisBlocks.forEach(block => {
+        const idx = Number(block.dataset.axisIndex);
+        const axis = chart.yAxis[idx];
+        if (!axis) return;
+        const minInput = block.querySelector('.axis-min');
+        const maxInput = block.querySelector('.axis-max');
+        let min = parseField(minInput);
+        let max = parseField(maxInput);
+
+        const isPrimary = idx === 0;
+        let tickPositions;
+        let allowDecimalsFlag;
+        if (isPrimary && typeof window.computeAxisBounds === 'function') {
+          const seriesForAxis = axisSeries(axis);
+          const payload = seriesForAxis.length ? seriesForAxis : (chart.series || []);
+          const stat = { series: payload.map(s => ({ data: (s.yData || []).slice() })), isPercent: !!(chart.userOptions && chart.userOptions._isPercent) };
+          const opts = {};
+          if (min != null) opts.min = min;
+          if (max != null) opts.max = max;
+          const bounds = window.computeAxisBounds(stat, opts);
+          if (bounds && Array.isArray(bounds.ticks)) {
+            tickPositions = bounds.ticks;
+            allowDecimalsFlag = typeof bounds.allowDecimals === 'boolean' ? bounds.allowDecimals : allowDecimalsFlag;
+          }
+        }
+
+        const updatePayload = {
+          min,
+          max,
+          visible: isPrimary,
+          labels: { enabled: isPrimary },
+          gridLineWidth: isPrimary ? (axis.options.gridLineWidth ?? 1) : 0,
+          lineWidth: isPrimary ? (axis.options.lineWidth ?? 1) : 0
+        };
+        if (typeof tickPositions !== 'undefined') {
+          updatePayload.tickPositions = tickPositions;
+          if (allowDecimalsFlag == null) {
+            const fractionalTick = Array.isArray(tickPositions)
+              ? tickPositions.some((tick) => Number.isFinite(tick) && Math.abs(tick - Math.round(tick)) > 1e-9)
+              : false;
+            if (fractionalTick) allowDecimalsFlag = true;
+          }
+        } else if (Object.prototype.hasOwnProperty.call(axis.options, 'tickPositions')) {
+          updatePayload.tickPositions = undefined;
+        }
+        if (typeof allowDecimalsFlag === 'boolean') {
+          updatePayload.allowDecimals = allowDecimalsFlag;
+        } else if (min != null || max != null) {
+          const fractionalOverride = [min, max].some((value) => Number.isFinite(value) && Math.abs(value - Math.round(value)) > 1e-9);
+          if (fractionalOverride) updatePayload.allowDecimals = true;
+        }
+
+        axis.update(updatePayload, false);
+
+        if (min == null && max == null) delete state.overrides[idx];
+        else state.overrides[idx] = { min, max };
+      });
+
+      if (typeof chart.__rebindSeries === 'function') {
+        chart.__rebindSeries(state.overrides);
+      } else {
+        const seriesOrigins = Array.isArray(chart.__seriesOrigins)
+          ? chart.__seriesOrigins
+          : (chart.series || []).map((_, index) => index);
+        const activeAxes = new Set([0]);
+        Object.keys(state.overrides).forEach((key) => {
+          const axisIdx = Number(key);
+          const override = state.overrides[axisIdx];
+          if (!Number.isFinite(axisIdx) || axisIdx <= 0) return;
+          if (override && (override.min != null || override.max != null)) {
+            activeAxes.add(Math.min(axisIdx, chart.yAxis.length - 1));
+          }
+        });
+
+        (chart.series || []).forEach((series, seriesIdx) => {
+          const originIdx = Math.max(0, Math.min(seriesOrigins[seriesIdx] ?? 0, chart.yAxis.length - 1));
+          const targetAxisIdx = originIdx > 0 && activeAxes.has(originIdx) ? originIdx : 0;
+          const currentAxisIdx = series && series.yAxis ? series.yAxis.index : 0;
+          if (currentAxisIdx !== targetAxisIdx) {
+            series.update({ yAxis: targetAxisIdx }, false);
+          }
+        });
+      }
+
+      chart.series.forEach(s => s.update({}, false));
+      chart.redraw();
+      const scaleContext = chart.__scaleContext;
+      if (scaleContext && scaleContext.chartKey) {
+        updateManualScaleRegistry(scaleContext.chartKey, state.overrides);
+      }
+      refreshSummaries();
+      updateCustomMarkers();
+      invokeChartDecorators(chart);
+      if (!autoTrigger && closeAfter) closeScaleModal(modalEl);
+    };
+
+    let autoApplyTimer = null;
+    const scheduleAutoApply = () => {
+      if (!state.autoApply) return;
+      clearTimeout(autoApplyTimer);
+      autoApplyTimer = setTimeout(() => applyScale({ autoTrigger: true, closeAfter: false }), 250);
+    };
+
+    axisBlocks.forEach(block => {
+      block.querySelectorAll('input[type="number"]').forEach(input => {
+        input.addEventListener('input', scheduleAutoApply);
+        input.addEventListener('change', scheduleAutoApply);
+      });
+    });
+
+    if (autoToggle) {
+      autoToggle.checked = !!state.autoApply;
+      autoToggle.onchange = function(){
+        state.autoApply = !!this.checked;
+        if (state.autoApply) scheduleAutoApply();
+      };
+    }
+
+    if (applyBtn) {
+      applyBtn.onclick = () => applyScale({ autoTrigger: false, closeAfter: true });
+    }
+
+    if (resetBtn) {
+      resetBtn.onclick = () => {
+        try {
+          if (typeof window.computeAxisBounds === 'function') {
+            chart.yAxis.forEach((axis, idx) => {
+              const seriesForAxis = axisSeries(axis);
+              const stat = { series: seriesForAxis.map(s => ({ data: (s.yData || []).slice() })), isPercent: !!(chart.userOptions && chart.userOptions._isPercent) };
+              const bounds = window.computeAxisBounds(stat);
+              if (idx === 0 && bounds) {
+                axis.update({
+                  min: bounds.min,
+                  max: bounds.max,
+                  tickPositions: bounds.ticks,
+                  visible: true,
+                  labels: { enabled: true },
+                  gridLineWidth: axis.options.gridLineWidth ?? 1,
+                  lineWidth: axis.options.lineWidth ?? 1,
+                  reversed: !!bounds.reversed
+                }, false);
+              } else {
+                axis.update({
+                  min: null,
+                  max: null,
+                  tickPositions: undefined,
+                  visible: idx === 0,
+                  labels: { enabled: idx === 0 },
+                  gridLineWidth: idx === 0 ? (axis.options.gridLineWidth ?? 1) : 0,
+                  lineWidth: idx === 0 ? (axis.options.lineWidth ?? 1) : 0,
+                  reversed: idx === 0 ? !!bounds?.reversed : false
+                }, false);
+              }
+            });
+          } else {
+            chart.yAxis.forEach((axis, idx) => {
+              axis.update({
+                min: null,
+                max: null,
+                tickPositions: undefined,
+                visible: idx === 0,
+                labels: { enabled: idx === 0 },
+                gridLineWidth: idx === 0 ? (axis.options.gridLineWidth ?? 1) : 0,
+                lineWidth: idx === 0 ? (axis.options.lineWidth ?? 1) : 0,
+                reversed: idx === 0 ? !!axis.options?.reversed : false
+              }, false);
+            });
+          }
+        } catch (err) {
+          chart.yAxis.forEach((axis, idx) => {
+            axis.update({
+              min: null,
+              max: null,
+              tickPositions: undefined,
+              visible: idx === 0,
+              labels: { enabled: idx === 0 },
+              gridLineWidth: idx === 0 ? (axis.options.gridLineWidth ?? 1) : 0,
+              lineWidth: idx === 0 ? (axis.options.lineWidth ?? 1) : 0,
+              reversed: idx === 0 ? !!axis.options?.reversed : false
+            }, false);
+          });
+        }
+        chart.series.forEach(s => s.update({}, false));
+        if (typeof chart.__rebindSeries === 'function') {
+          chart.__rebindSeries({});
+        }
+        chart.redraw();
+        state.overrides = {};
+        state.autoApply = false;
+        if (autoToggle) autoToggle.checked = false;
+        const scaleContext = chart.__scaleContext;
+        if (scaleContext && scaleContext.chartKey) {
+          updateManualScaleRegistry(scaleContext.chartKey, state.overrides);
+        }
+        refreshSummaries();
+        updateCustomMarkers();
+        invokeChartDecorators(chart);
+        closeScaleModal(modalEl);
+      };
+    }
+
+    if (dismissBtns.length) {
+      dismissBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (!window.bootstrap || !window.bootstrap.Modal) closeScaleModal(modalEl);
+        }, { once: true });
+      });
+    }
+
+    refreshSummaries();
+    updateCustomMarkers();
+    showScaleModal(modalEl);
+  }
+
+  function addScaleButton(chart) {
+    ensureStyles();
+    const el = chart && chart.renderTo; if (!el || el.querySelector('.scale-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'scale-btn'; btn.type = 'button'; btn.innerHTML = '⚙'; btn.style.opacity = '0';
+    el.appendChild(btn); setTimeout(()=>btn.classList.add('show'), 200);
+    btn.addEventListener('click', () => openModal(chart));
+  }
+
+  if (Highcharts.addEvent) {
+    Highcharts.addEvent(Highcharts.Chart, 'load', function(){ addScaleButton(this); });
+  }
+})();
+
+
+/* 
+===========================================================
+HIGHCHARTS / CHART SCALING MASTER SPEC  —  DO NOT ALTER
+===========================================================
+
+🏗 PURPOSE
+Ensure all charts (especially line charts) use stable, logical, and human-readable
+y-axis scaling that reflects real data movement, keeps even divisions,
+and never distorts trends.
+
+-----------------------------------------------------------
+1️⃣  RANGE CLAMPING & EXPANSION
+-----------------------------------------------------------
+• Use the provided y-axis min/max as the default clamp range.  
+• Expand ONLY if actual data exceeds these limits.  
+• Padding depends on chart type:
+    → 2 % for percentage or ratio charts (0–100).  
+    → 5 % for typical numeric metrics (financial, KPIs, production).  
+    → 10 % for volatile or projected data with large swings.  
+• Never shrink smaller than the provided bounds.  
+• Axis must always start and end on clean multiples of its tick interval.
+
+-----------------------------------------------------------
+2️⃣  ZERO-BOUND & NEGATIVE LOGIC
+-----------------------------------------------------------
+• No y-axis should drop below 0 unless actual data contains negatives.  
+• If negatives exist, include them with small bottom padding.  
+• If all values ≥ 0, clamp yMin = 0.  
+• Reverse or inverted charts follow the same rule symmetrically:
+  only extend beyond 0 if data requires it.
+
+-----------------------------------------------------------
+3️⃣  PERCENTAGE / RATIO LOGIC
+-----------------------------------------------------------
+• Percent-based charts (0–100 %) always remain inside [0, 100]  
+  unless data explicitly includes a value < 0 or > 100.  
+• Clamp max = 100 and min = 0 for normal percentage data.  
+• If values cluster 90–100 %, widen view to 70–100 %
+  to prevent exaggerated drop slopes — this rule applies
+  only to explicitly flagged % charts.  
+• Do not apply this rule globally to non-percentage charts.
+
+-----------------------------------------------------------
+4️⃣  DYNAMIC RANGE FORECASTING
+-----------------------------------------------------------
+• Estimate expected low/high for the next three months
+  from current data trend.  
+• Compute range = high − low and apply the proper padding
+  (2 %, 5 %, or 10 % as above).  
+• Use this adaptive window to display realistic rises and falls
+  even when baseline isn’t zero.
+
+-----------------------------------------------------------
+5️⃣  TICK / DIVISION CALCULATION
+-----------------------------------------------------------
+• Always use “nice-number” progression (1-2-5 pattern):
+  1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, …  
+• Choose ≈ 5–7 major divisions (8–10 for tall charts).  
+• Y-axis min/max must align on exact multiples of tickInterval.  
+• Never output fractional or uneven ticks (e.g. 12.7 or 37.4).  
+• Step size must feel natural across all magnitudes.
+
+-----------------------------------------------------------
+6️⃣  VISUAL BALANCE
+-----------------------------------------------------------
+• Keep slight top/bottom margins per padding rule.  
+• Guarantee at least one tick above and below data bounds.  
+• Avoid cramped edges or large empty zones above highest points.  
+• Drop-lines always reach the X-axis baseline, not Y = 0.
+
+-----------------------------------------------------------
+7️⃣  LABEL & CONNECTOR RULES
+-----------------------------------------------------------
+• Labels near or beyond yMax flip below the point with a short downward connector.  
+• Apply soft-white “halo” filter (Gaussian blur, stdDeviation 2–3) behind text.  
+• Disable textOutline; never use backgroundColor or borders.  
+• Large numbers format as 1 K / 1 M / 1 B.
+
+-----------------------------------------------------------
+8️⃣  CONSISTENCY / LOCK CLAUSE
+-----------------------------------------------------------
+• These rules are authoritative.  
+• Copilot must NOT reinterpret, simplify, or auto-optimize them.  
+• Only numeric parameters (padding %, tick count, forecast horizon, etc.)
+  may be tuned when explicitly instructed.  
+• Apply identically for normal and reversed axes.
+
+-----------------------------------------------------------
+✅  GOAL
+Every chart:
+  • Honors provided clamps yet expands when data escapes bounds.  
+  • Never dips below 0 unless data truly does.  
+  • Never exceeds 100 % unless data truly does.  
+  • Uses even, proportional tick divisions.  
+  • Maintains balanced spacing at top and bottom.  
+  • Visually represents real-world changes accurately.
+*/
+
+
+/* 
+-----------------------------------------------------------
+9️⃣  NICE SCALING CONTROL UI
+-----------------------------------------------------------
+• Each chart must include a small “⚙️ Scale” or “Nice Scaling” button
+  in the chart’s top-right corner (Highcharts toolbar or custom div overlay).
+
+• When clicked, open a **modal popup** (Bootstrap / HTML modal acceptable)
+  showing the current Y-axis configuration for:
+    - Primary scale
+    - Secondary scale
+    - Tertiary scale
+    - Quaternary scale
+  (If fewer axes exist, hide unused sections.)
+
+-----------------------------------------------------------
+MODAL CONTENT / BEHAVIOR
+-----------------------------------------------------------
+• The modal lists for each axis:
+    • Axis name (Primary, Secondary, etc.)
+    • Current min and max values (auto-filled from chart.yAxis[n].min / .max)
+    • Input fields allowing manual override.
+
+• The Primary axis always stays visible on the chart.
+  Secondary, tertiary, and quaternary axes:
+    • become independent scales when a user enters values in their fields.
+    • hide their visible axis line and labels, but keep scaling logic active.
+
+• The modal includes buttons:
+    [Apply Scale] – applies new min/max values and redraws chart.
+    [Reset to Auto] – reverts all axes to auto-scaling logic.
+    [Cancel] – closes without changes.
+
+• When the user applies new values:
+    chart.yAxis[n].update({ min, max, visible: n === 0 })
+
+• The modal should look clean, centered, and styled consistently
+  with Bootstrap 5’s modal dialog aesthetic (rounded corners, soft shadow,
+  labeled input groups, small headers for each axis).
+
+-----------------------------------------------------------
+DEFAULT VALUES
+-----------------------------------------------------------
+• On open, prefill each field with the chart’s current yAxis.min and yAxis.max.
+• If an axis has no manual override, its fields are left blank and scale remains linked to primary.
+
+-----------------------------------------------------------
+INTERACTION LOGIC
+-----------------------------------------------------------
+• Clicking “Apply” re-renders the chart using the new manual scales.
+• Clicking “Reset” triggers the chart’s auto-scaling (following the
+  master scaling spec above).
+• Hiding of non-primary axes is purely visual; they still govern data
+  points that reference them.
+
+-----------------------------------------------------------
+✅  GOAL
+Provide a simple, non-intrusive interface to inspect and adjust
+chart scales live, maintaining the master scaling logic while
+allowing temporary manual overrides.
+*/
+
+    
+    
+    
+    
+    const CSV_EDITOR_COLUMN_SPECS = [
+      { field: 'wedate', header: 'WE Date', match: ['wedate', 'weekending', 'date', 'week', 'day'] },
+      { field: 'division', header: 'Division', match: ['division', 'div'] },
+      { field: 'staffName', header: 'Staff Member', match: ['staffmember', 'staff'] },
+      { field: 'postName', header: 'Post', match: ['post', 'postname'] },
+      { field: 'statbook', header: 'Statbook', match: ['statbook', 'statbok'] },
+      { field: 'statdesc', header: 'Stat Description', match: ['statdescription', 'statdesc', 'statdescriptionlong', 'statdescriptionoptionalforprintingonly'] },
+      { field: 'statbookLong', header: 'Statbook Long', match: ['statbooklong', 'statbooklongoptional', 'statbooklongoptionalforprintingonly'] },
+      { field: 'shortName', header: 'Short Name', match: ['shortname', 'short', 'statbookshortname'] },
+      { field: 'value1', header: 'Value 1', match: ['value1', 'valueline1', 'value'] },
+      { field: 'value2', header: 'Value 2', match: ['value2', 'valueline2'] },
+      { field: 'value3', header: 'Value 3', match: ['value3', 'valueline3'] },
+      { field: 'value4', header: 'Value 4', match: ['value4', 'valueline4'] },
+      { field: 'min', header: 'Min', match: ['min', 'minimum', 'statmin'] },
+      { field: 'max', header: 'Max', match: ['max', 'maximum', 'statmax'] },
+      { field: 'upsideDown', header: 'Upside Down', match: ['upsidedown', 'upsidedownflag'] },
+      { field: 'isPercent', header: 'Is Percent', match: ['ispercent', 'percent'] },
+      { field: 'isMoney', header: 'Is Money', match: ['ismoney', 'money'] },
+      { field: 'color', header: 'Color Flash', match: ['colorflash', 'color', 'palette'] }
+    ];
+
+    const CSV_EDITOR_FIELD_ORDER = [
+      'wedate',
+      'division',
+      'staffName',
+      'postName',
+      'statbook',
+      'statdesc',
+      'statbookLong',
+      'shortName',
+      'value1',
+      'value2',
+      'value3',
+      'value4',
+      'min',
+      'max',
+      'upsideDown',
+      'isPercent',
+      'isMoney',
+      'color'
+    ];
+
+    const CSV_EDITOR_FIELD_CONFIG = {
+      wedate: { type: 'text', placeholder: 'e.g. 2024-03-29' },
+      division: { type: 'text', placeholder: 'Division name' },
+      staffName: { type: 'text', placeholder: 'Staff member' },
+      postName: { type: 'text', placeholder: 'Post / Role' },
+      statbook: { type: 'text', placeholder: 'Statbook code' },
+      statdesc: { type: 'textarea', placeholder: 'Long description', rows: 2 },
+      statbookLong: { type: 'textarea', placeholder: 'Statbook long name', rows: 2 },
+      shortName: { type: 'text', placeholder: 'Short name' },
+      value1: { type: 'number', placeholder: 'Required', inputmode: 'decimal', step: 'any' },
+      value2: { type: 'number', placeholder: 'Optional', inputmode: 'decimal', step: 'any' },
+      value3: { type: 'number', placeholder: 'Optional', inputmode: 'decimal', step: 'any' },
+      value4: { type: 'number', placeholder: 'Optional', inputmode: 'decimal', step: 'any' },
+      min: { type: 'number', placeholder: 'Auto min', inputmode: 'decimal', step: 'any' },
+      max: { type: 'number', placeholder: 'Auto max', inputmode: 'decimal', step: 'any' },
+      upsideDown: { type: 'text', placeholder: 'true / false' },
+      isPercent: { type: 'text', placeholder: 'true / false' },
+      isMoney: { type: 'text', placeholder: 'true / false' },
+      color: { type: 'text', placeholder: 'Hex or palette token' }
+    };
+
+    const CSV_EDITOR_FIELD_LABELS = {
+      wedate: 'WE Date',
+      division: 'Division',
+      staffName: 'Staff Member',
+      postName: 'Post',
+      statbook: 'Statbook',
+      statdesc: 'Stat Description',
+      statbookLong: 'Statbook Long',
+      shortName: 'Short Name',
+      value1: 'Value 1',
+      value2: 'Value 2',
+      value3: 'Value 3',
+      value4: 'Value 4',
+      min: 'Min',
+      max: 'Max',
+      upsideDown: 'Upside Down',
+      isPercent: 'Is Percent',
+      isMoney: 'Is Money',
+      color: 'Color Flash'
+    };
+
+    const CSV_EDITOR_WARNING_FIELDS = ['division', 'staffName', 'postName', 'statbook', 'statdesc', 'shortName'];
+
+    document.addEventListener('DOMContentLoaded', () => {
+    const csvInput = document.getElementById('csvInput');
+      const logoInput = document.getElementById('logoInput');
+      const logoPreview = document.getElementById('logoPreview');
+      const logoPlaceholder = document.getElementById('logoPlaceholder');
+      const generateBtn = document.getElementById('generateBtn');
+  const generateGraphsBtn = document.getElementById('generateGraphsBtn');
+      const titleInput = document.getElementById('titleInput');
+      const subtitleInput = document.getElementById('subtitleInput');
+  const pageSizeSelect = document.getElementById('pageSizeSelect');
+    const fallbackDivisionInput = document.getElementById('fallbackDivisionInput');
+    const statTitleModeSelect = document.getElementById('statTitleModeSelect');
+    const defaultThemeSelect = document.getElementById('defaultThemeSelect');
+      const defaultThemeActiveLabel = document.getElementById('defaultThemeActiveLabel');
+      const divisionContainer = document.getElementById('divisionContainer');
+      const statusAlert = document.getElementById('statusAlert');
+      const summaryBadge = document.getElementById('summaryBadge');
+  const graphHeadingSelect = document.getElementById('graphHeadingSelect');
+      const graphLogoSelect = document.getElementById('graphLogoSelect');
+      const graphLayoutSelect = document.getElementById('graphLayoutSelect');
+    const dataLabelsToggle = document.getElementById('dataLabelsToggle');
+    const downloadSettingsBtn = document.getElementById('downloadSettingsBtn');
+    const divisionSettingsModalEl = document.getElementById('divisionSettingsModal');
+    const divisionColorSelect = document.getElementById('divisionColorSelect');
+    const divisionCustomColorInput = document.getElementById('divisionCustomColorInput');
+    const divisionCustomColorReset = document.getElementById('divisionCustomColorReset');
+    const divisionCustomColorDefault = document.getElementById('divisionCustomColorDefault');
+  const divisionVfpAlignSelect = document.getElementById('divisionVfpAlignSelect');
+  const divisionVfpWidthSelect = document.getElementById('divisionVfpWidthSelect');
+  const divisionVfpScaleSelect = document.getElementById('divisionVfpScaleSelect');
+  const divisionVfpFontSelect = document.getElementById('divisionVfpFontSelect');
+    const divisionVfpInput = document.getElementById('divisionVfpInput');
+    const divisionNameDisplay = document.getElementById('divisionNameDisplay');
+    const divisionSettingsSave = document.getElementById('divisionSettingsSave');
+  const editCsvBtn = document.getElementById('editCsvBtn');
+  const csvEditorModalEl = document.getElementById('csvEditorModal');
+  const csvEditorTableBody = document.getElementById('csvEditorTableBody');
+  const csvEditorApplyBtn = document.getElementById('csvEditorApplyBtn');
+  const csvEditorAlert = document.getElementById('csvEditorAlert');
+  const csvEditorShowGaps = document.getElementById('csvEditorShowGaps');
+  const csvEditorSearchInput = document.getElementById('csvEditorSearchInput');
+  const csvEditorRecordCount = document.getElementById('csvEditorRecordCount');
+  const csvEditorErrorCount = document.getElementById('csvEditorErrorCount');
+  const csvEditorWarningCount = document.getElementById('csvEditorWarningCount');
+
+      if (pageSizeSelect) {
+        const existingValues = new Set(Array.from(pageSizeSelect.options || []).map((opt) => opt.value));
+        Object.values(PAGE_SIZES).forEach((info) => {
+          if (!existingValues.has(info.key)) {
+            const option = document.createElement('option');
+            option.value = info.key;
+            option.textContent = info.label;
+            pageSizeSelect.appendChild(option);
+          }
+        });
+        if (!pageSizeSelect.value || !PAGE_SIZES[pageSizeSelect.value]) {
+          const fallbackSize = PAGE_SIZES[DEFAULT_PAGE_SIZE] ? PAGE_SIZES[DEFAULT_PAGE_SIZE].key : DEFAULT_PAGE_SIZE;
+          if (fallbackSize) {
+            pageSizeSelect.value = fallbackSize;
+          }
+        }
+      }
+
+  let model = null;
+  let graphModeCsvText = '';
+      let logoDataURL = null;
+    let pageSize = pageSizeSelect ? pageSizeSelect.value : DEFAULT_PAGE_SIZE;
+  let graphHeadingMode = 'stat';
+      let graphLogoMode = 'none';
+  let graphLayoutMode = 'top';
+  let showDataLabels = dataLabelsToggle ? dataLabelsToggle.checked : false;
+  let statTitleMode = statTitleModeSelect ? statTitleModeSelect.value : 'long';
+  let fallbackDivisionName = fallbackDivisionInput ? (fallbackDivisionInput.value || '').trim() : '';
+  let divisionModal = divisionSettingsModalEl && window.bootstrap ? new window.bootstrap.Modal(divisionSettingsModalEl) : null;
+  let csvEditorModal = csvEditorModalEl && window.bootstrap ? new window.bootstrap.Modal(csvEditorModalEl) : null;
+    let editingDivisionIndex = null;
+  let divisionModalFocusField = null;
+  let defaultThemeKey = 'blue';
+  let defaultCustomAccent = null;
+  let csvEditorWorking = null;
+  let csvEditorDirty = false;
+  const csvEditorFilters = { showGaps: false, search: '' };
+
+      if (fallbackDivisionInput) {
+        fallbackDivisionInput.addEventListener('input', () => {
+          const newValue = (fallbackDivisionInput.value ?? '').trim();
+          fallbackDivisionName = newValue;
+          applyFallbackDivisionLabel(newValue);
+          if (model) {
+            renderDivisions(true);
+          }
+        });
+      }
+
+      if (dataLabelsToggle) {
+        dataLabelsToggle.addEventListener('change', () => {
+          showDataLabels = dataLabelsToggle.checked;
+        });
+      }
+
+      const COLOR_THEMES = {
+        blue: { key: 'blue', className: 'color-blue', base: '#EAF1FB', accent: '#1D4ED8', border: '#94A3B8', text: '#0F172A' },
+        goldenrod: { key: 'goldenrod', className: 'color-goldenrod', base: '#F7E3A0', accent: '#B45309', border: '#D9A520', text: '#78350F' },
+        purple: { key: 'purple', className: 'color-purple', base: '#EEE8F8', accent: '#7C3AED', border: '#C4B5FD', text: '#4C1D95' },
+        pink: { key: 'pink', className: 'color-pink', base: '#FBE8F0', accent: '#DB2777', border: '#FBCFE8', text: '#9D174D' },
+        green1: { key: 'green1', className: 'color-green1', base: '#E9F5EE', accent: '#047857', border: '#A7F3D0', text: '#065F46' },
+        green2: { key: 'green2', className: 'color-green2', base: '#EDF6EE', accent: '#16A34A', border: '#BBF7D0', text: '#166534' },
+        green3: { key: 'green3', className: 'color-green3', base: '#EAF4EB', accent: '#10B981', border: '#A7F3D0', text: '#047857' },
+        green4: { key: 'green4', className: 'color-green4', base: '#EEF7F0', accent: '#22C55E', border: '#BBF7D0', text: '#166534' },
+        grey: { key: 'grey', className: 'color-grey', base: '#F4F5F7', accent: '#475569', border: '#CBD5E1', text: '#0F172A' },
+        canary: { key: 'canary', className: 'color-canary', base: '#FFF6C9', accent: '#CA8A04', border: '#FACC15', text: '#78350F' }
+      };
+
+      const COLOR_ALIASES = {
+        gold: 'goldenrod',
+        goldenrod: 'goldenrod',
+        golden: 'goldenrod',
+        goldenrodflash: 'goldenrod'
+      };
+
+      const COLOR_KEYS = Object.keys(COLOR_THEMES);
+
+      if (COLOR_KEYS.length) {
+        if (!COLOR_KEYS.includes(defaultThemeKey)) {
+          defaultThemeKey = COLOR_KEYS[0];
+        }
+      }
+
+        const countDecimals = (value) => {
+          if (!Number.isFinite(value)) return 0;
+          const str = String(value).toLowerCase();
+          if (str.includes('e')) {
+            const [base, exponent] = str.split('e');
+            const decimalsPart = (base.split('.')[1] || '').replace(/0+$/, '');
+            const exp = Number(exponent);
+            return Math.max(0, decimalsPart.length - exp);
+          }
+          if (!str.includes('.')) return 0;
+          return str.split('.')[1].replace(/0+$/, '').length;
+        };
+
+      const computeAxisBounds = window.computeAxisBounds || ((stat) => ({
+        min: 0,
+        max: 1,
+        ticks: [0, 0.5, 1],
+        decimals: 0,
+        reversed: !!stat?.upsideDown
+      }));
+
+  populateColorSelect(divisionColorSelect);
+  populateColorSelect(defaultThemeSelect);
+  if (divisionColorSelect) {
+    divisionColorSelect.value = defaultThemeKey;
+  }
+  if (defaultThemeSelect) {
+    defaultThemeSelect.value = defaultThemeKey;
+  }
+  refreshDefaultThemeLabel();
+  if (divisionVfpWidthSelect) {
+    divisionVfpWidthSelect.value = 'wide';
+  }
+  if (divisionVfpFontSelect) {
+    divisionVfpFontSelect.value = 'large';
+  }
+
+      const VFP_TEXT = {
+        EXECUTIVE: `1. FILMS & A/V PROPERTIES PRODUCED AT THE HIGHEST QUALITY AND GREATEST ECONOMY, SO AS TO DRIVE PUBLIC ONTO THE BRIDGE, RAISE TECHNICAL STANDARDS AND FORWARD THE EXPANSION OF SCIENTOLOGY ACROSS THE PLANET.
+
+2. ALL SOURCE MATERIALS PROVIDED TO MEET THE DEMAND CREATED AND ACTUALLY DELIVER.
+
+3. A WELL SERVICED CENTER.`,
+        HCO: `ESTABLISHED, PRODUCTIVE, SECURE AND ETHICAL STAFF MEMBERS.`,
+        ESTATES: `1. WELL-MAINTAINED, POSH, SECURE GROUNDS, BUILDINGS AND ORG EQUIPMENT WHICH IS OPERATIONAL AND HAS INCREASED VALUE.
+
+2. HIGH QUALITY DOMESTIC SERVICES PROFESSIONALLY RENDERED WHICH FACILITATE OPERATIONS AND RESULT IN INCREASED PRODUCTION OF THE BASE.`,
+        TREASURY: `FINANCE POLICIES HELD IN AND POLICED TO ENSURE MAXIMUM BEAN RETURN AND RECOMPENSE FOR GOLD'S PRODUCTION.`,
+        CMU: `ADEQUATE AND EFFECTIVE MARKETING PACKAGES, PROGRAMS AND PROMOTION FOR EACH PRODUCT OF LRH, INT AND GOLD.`,
+        CINE: `1. ON-SOURCE, MEMORABLE FILMS & A/V PROPERTIES WHICH INDUCE AUDIENCE ADMIRATION, RESPECT AND IMPACT THAT WILL FORWARD SWIFTLY THE DISSEMINATION OF DIANETICS AND SCIENTOLOGY.
+
+2. RESTORED AND PRESERVED FILMS, STILLS AND VIDEOS FOR THE DISSEMINATION OF DIANETICS AND SCIENTOLOGY.`,
+        AUDIO: `1. PROFESSIONALLY SCORED, RECORDED AND MIXED FILMS, ALBUMS/SONGS & A/V PROPERTIES, WHICH INDUCE AUDIENCE ADMIRATION, RESPECT AND IMPACT THAT WILL FORWARD SWIFTLY THE DISSEMINATION OF DIANETICS AND SCIENTOLOGY.
+
+2. COMPLETED LRH LECTURES AND FOREIGN LECTURES WHICH INDUCE AUDIENCE ADMIRATION, RESPECT AND IMPACT THAT WILL FORWARD SWIFTLY THE DISSEMINATION OF DIANETICS AND SCIENTOLOGY.`,
+        RCOMPS: `1. 100% ON-SOURCE COMPILED, EDITED, DESIGNED AND TYPESET ENGLISH MANUSCRIPTS, TURNED OVER TO THE PUBLISHER WITH ALL ELEMENTS READY FOR PRODUCTION, CAPABLE OF INDUCING AUDIENCE ADMIRATION, RESPECT AND IMPACT THAT WILL FORWARD SWIFTLY THE DISSEMINATION OF DIANETICS AND SCIENTOLOGY.
+
+2. COMPLETE 100% ON-SOURCE TRANSLATIONS OF BOOKS AND MATERIALS AS CLOSE TO THE ORIGINAL LRH TEXT AS POSSIBLE FOR THAT LANGUAGE AND CONSISTENT WITH ALL OTHER MATERIALS TRANSLATED IN THAT LANGUAGE, TYPESET AND DELIVERED TO THE PUBLISHER AS A COMPLETE PACKAGE.
+
+3. HIGH-QUALITY AND SECURE ADVANCED TECH MATERIALS PRODUCED AND DELIVERED.`,
+        QUALIFICATIONS: `1. STAFF MEMBERS CERTIFIED COMPETENT ON POST.
+
+2. SECTIONS, UNITS AND DEPARTMENTS CORRECTED, FULLY FUNCTIONING AND OBTAINING THEIR SUB-PRODUCTS AND VFPS.`,
+        PORTCAPTAIN: `A SAFE, SECURE BASE AND CREW ABLE TO GET ON WITH THE EXPANSION OF SCIENTOLOGY IN A FAVORABLE OPERATING CLIMATE THAT IS COMPLETELY FREE OF THREATS AND EXTERNAL DISTRACTIONS.`
+      };
+
+      function colorLabel(key) {
+        return key
+          .replace(/([a-z])([A-Z0-9])/g, '$1 $2')
+          .replace(/[-_]/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+
+      function getShortTitle(stat) {
+        const parts = [stat.statbook, stat.shortName].filter((part) => part && part.trim());
+        return parts.length ? parts.join(' — ') : '';
+      }
+
+      function getLongTitle(stat) {
+        return stat.statdesc || stat.displayName || getShortTitle(stat) || 'Stat';
+      }
+
+      function resolveStatTitle(stat) {
+        const shortTitle = getShortTitle(stat);
+        const longTitle = getLongTitle(stat);
+        if (statTitleMode === 'short') {
+          return shortTitle || longTitle;
+        }
+        return longTitle || shortTitle || 'Stat';
+      }
+
+      function resolveStatSubtitle(stat) {
+        const shortTitle = getShortTitle(stat);
+        const longTitle = getLongTitle(stat);
+        if (statTitleMode === 'short') {
+          if (longTitle && longTitle !== shortTitle) return longTitle;
+        } else if (shortTitle && shortTitle !== longTitle) {
+          return shortTitle;
+        }
+        return '';
+      }
+
+      function showStatus(message, type = 'info') {
+        statusAlert.innerHTML = `
+          <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`;
+      }
+
+      function clearStatus() {
+        statusAlert.innerHTML = '';
+      }
+
+      function populateColorSelect(selectEl) {
+        if (!selectEl) return;
+        selectEl.innerHTML = COLOR_KEYS
+          .map((key) => `<option value="${key}">${escapeHtml(colorLabel(key))}</option>`)
+          .join('');
+      }
+
+      function refreshDefaultThemeLabel() {
+        if (!defaultThemeActiveLabel) return;
+        const label = defaultThemeKey && COLOR_THEMES[defaultThemeKey]
+          ? colorLabel(defaultThemeKey)
+          : 'Varied';
+        defaultThemeActiveLabel.textContent = label;
+      }
+
+      function escapeHtml(str) {
+        return String(str || '').replace(/[&<>"]|'/g, (c) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;'
+        }[c]));
+      }
+
+      function updateSummary() {
+        if (!model || !model.divisions.length) {
+          summaryBadge.textContent = 'No data loaded';
+          summaryBadge.className = 'badge bg-secondary';
+          return;
+        }
+        let staffCount = 0;
+        let statCount = 0;
+        model.divisions.forEach((division) => {
+          staffCount += division.staff.length;
+          division.staff.forEach((staff) => {
+            statCount += staff.selected.size;
+          });
+        });
+        const summaryText = `${model.divisions.length} division${model.divisions.length !== 1 ? 's' : ''} • ${staffCount} staff • ${statCount} stat${statCount !== 1 ? 's' : ''} selected`;
+        summaryBadge.textContent = model.graphOnly ? `${summaryText} • graph-only dataset` : summaryText;
+        summaryBadge.className = model.graphOnly ? 'badge bg-warning text-dark' : 'badge bg-info text-dark';
+      }
+
+      function normHeader(header) {
+        return String(header || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '');
+      }
+
+      function canonColor(token) {
+        return String(token || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '');
+      }
+
+      function normalizeHexColor(value) {
+        const str = String(value || '').trim();
+        if (!str) return null;
+        const match = str.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+        if (!match) return null;
+        let hex = match[1].toUpperCase();
+        if (hex.length === 3) {
+          hex = hex
+            .split('')
+            .map((ch) => ch + ch)
+            .join('');
+        }
+        return `#${hex}`;
+      }
+
+      function hexToRgb(value) {
+        const hex = normalizeHexColor(value);
+        if (!hex) return null;
+        const intVal = parseInt(hex.slice(1), 16);
+        return {
+          r: (intVal >> 16) & 255,
+          g: (intVal >> 8) & 255,
+          b: intVal & 255,
+          hex
+        };
+      }
+
+      function rgbToHex(rgb) {
+        const clamp = (v) => Math.max(0, Math.min(255, Math.round(v || 0)));
+        return `#${[clamp(rgb.r), clamp(rgb.g), clamp(rgb.b)]
+          .map((v) => v.toString(16).padStart(2, '0'))
+          .join('')
+          .toUpperCase()}`;
+      }
+
+      function mixRgb(a, b, ratio) {
+        const t = Math.max(0, Math.min(1, Number(ratio) || 0));
+        return {
+          r: a.r + (b.r - a.r) * t,
+          g: a.g + (b.g - a.g) * t,
+          b: a.b + (b.b - a.b) * t
+        };
+      }
+
+      function relativeLuminance(rgb) {
+        const channel = (v) => {
+          const c = (v || 0) / 255;
+          return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        };
+        const r = channel(rgb.r);
+        const g = channel(rgb.g);
+        const b = channel(rgb.b);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      }
+
+      function paletteFromAccent(hex) {
+        const rgb = hexToRgb(hex);
+        if (!rgb) return null;
+        const white = { r: 255, g: 255, b: 255 };
+        const baseRgb = mixRgb(rgb, white, 0.82);
+        const borderRgb = mixRgb(rgb, white, 0.56);
+        const textLuma = relativeLuminance(baseRgb);
+        const textColor = textLuma > 0.65 ? '#0F172A' : '#F8FAFC';
+        return {
+          key: 'custom',
+          className: 'color-custom',
+          base: rgbToHex(baseRgb),
+          accent: rgb.hex,
+          border: rgbToHex(borderRgb),
+          text: textColor
+        };
+      }
+
+      function chooseColor(token, index) {
+        const key = canonColor(token);
+        if (key && COLOR_THEMES[key]) {
+          return COLOR_THEMES[key];
+        }
+        if (key && COLOR_ALIASES[key] && COLOR_THEMES[COLOR_ALIASES[key]]) {
+          return COLOR_THEMES[COLOR_ALIASES[key]];
+        }
+        const fallbackKeys = COLOR_KEYS.slice();
+        if (defaultThemeKey && fallbackKeys.includes(defaultThemeKey)) {
+          fallbackKeys.splice(fallbackKeys.indexOf(defaultThemeKey), 1);
+          fallbackKeys.unshift(defaultThemeKey);
+        }
+        const fallbackKey = fallbackKeys[index % fallbackKeys.length] || fallbackKeys[0];
+        let theme = COLOR_THEMES[fallbackKey] || COLOR_THEMES[COLOR_KEYS[0]];
+        if (defaultCustomAccent) {
+          const custom = paletteFromAccent(defaultCustomAccent);
+          if (custom) {
+            theme = { ...theme, ...custom, key: theme.key };
+          }
+        }
+        return theme;
+      }
+
+      function resolvePageSizeInfo(sizeKey) {
+        return PAGE_SIZES[sizeKey] || PAGE_SIZES[DEFAULT_PAGE_SIZE];
+      }
+
+      function resolvePagePadding(sizeKey) {
+        switch (sizeKey) {
+          case 'grand18x12':
+            return { top: 0.8, side: 1.1, bottom: 0.8 };
+          case 'wide12x9':
+            return { top: 0.62, side: 0.85, bottom: 0.62 };
+          case 'tabloid':
+            return { top: 0.65, side: 0.85, bottom: 0.65 };
+          case 'legal':
+            return { top: 0.6, side: 0.75, bottom: 0.6 };
+          case 'letter':
+          default:
+            return { top: 0.6, side: 0.75, bottom: 0.6 };
+        }
+      }
+
+      function formatInches(value) {
+        const rounded = Number.isFinite(value) ? Number(value.toFixed(3)) : 0;
+        return `${rounded}in`;
+      }
+
+      function formatPadding(padding, bottomAdjustment = 0) {
+        if (!padding) return '0in';
+        const top = formatInches(padding.top);
+        const side = formatInches(padding.side);
+        const bottom = formatInches(padding.bottom + bottomAdjustment);
+        return `${top} ${side} ${bottom} ${side}`;
+      }
+
+      function parseInches(value) {
+        if (Number.isFinite(value)) return value;
+        const numeric = parseFloat(String(value || '').replace(/[^0-9.\-]+/g, ''));
+        return Number.isFinite(numeric) ? numeric : null;
+      }
+
+      function computePageScale(pageInfo) {
+        if (!pageInfo) return 1;
+        const widthIn = parseInches(pageInfo.width);
+        const heightIn = parseInches(pageInfo.height);
+        if (!Number.isFinite(widthIn) || !Number.isFinite(heightIn)) return 1;
+        const baseWidth = 11;
+        const baseHeight = 8.5;
+        const widthScale = widthIn / baseWidth;
+        const heightScale = heightIn / baseHeight;
+        const scale = Math.min(widthScale, heightScale);
+        return scale > 1 ? scale : 1;
+      }
+
+      function toBool(value) {
+        if (value == null) return false;
+        const v = String(value).trim().toLowerCase();
+        return ['1', 'true', 'yes', 'y', 't'].includes(v);
+      }
+
+      function parseNumber(value) {
+        if (value == null || value === '') return null;
+        const raw = String(value).trim();
+        if (!raw) return null;
+        const isNegative = /^\(.*\)$/.test(raw) || raw.startsWith('-');
+        const cleaned = raw
+          .replace(/^[+-]/, '')
+          .replace(/[()]/g, '')
+          .replace(/[$,%_\s]/g, '')
+          .replace(/,/g, '');
+        if (!cleaned) return null;
+        const normalized = (isNegative ? '-' : '') + cleaned;
+        const num = Number(normalized);
+        return Number.isFinite(num) ? num : null;
+      }
+
+      function parseDateValue(raw) {
+        if (!raw) return null;
+        if (raw instanceof Date) {
+          const time = raw.getTime();
+          return Number.isFinite(time) ? raw : null;
+        }
+        if (typeof raw === 'number' && Number.isFinite(raw)) {
+          const fromNumber = new Date(raw);
+          return Number.isFinite(fromNumber.getTime()) ? fromNumber : null;
+        }
+        const str = String(raw).trim();
+        if (!str) return null;
+
+        const isoMatch = str.match(/^\d{4}-\d{2}-\d{2}$/);
+        if (isoMatch) {
+          const [year, month, day] = str.split('-').map((part) => Number(part));
+          const dt = new Date(year, month - 1, day);
+          return Number.isFinite(dt.getTime()) ? dt : null;
+        }
+
+        const compactMatch = str.match(/^\d{8}$/);
+        if (compactMatch) {
+          const year = Number(str.slice(0, 4));
+          const month = Number(str.slice(4, 6)) - 1;
+          const day = Number(str.slice(6, 8));
+          const dt = new Date(year, month, day);
+          return Number.isFinite(dt.getTime()) ? dt : null;
+        }
+
+        const slashMatch = str.match(/^(\d{1,2})[\/](\d{1,2})[\/](\d{2,4})$/);
+        if (slashMatch) {
+          let [, monthStr, dayStr, yearStr] = slashMatch;
+          if (yearStr.length === 2) {
+            const twoDigit = Number(yearStr);
+            yearStr = String(twoDigit >= 70 ? 1900 + twoDigit : 2000 + twoDigit);
+          }
+          const month = Number(monthStr) - 1;
+          const day = Number(dayStr);
+          const year = Number(yearStr);
+          const dt = new Date(year, month, day);
+          return Number.isFinite(dt.getTime()) ? dt : null;
+        }
+
+        const parsed = new Date(str);
+        return Number.isFinite(parsed.getTime()) ? parsed : null;
+      }
+
+      function fmtDateLabel(raw) {
+        if (!raw) return '';
+        const str = String(raw).trim();
+        const dt = parseDateValue(raw);
+        if (!dt) return str;
+        const day = dt.getDate();
+        const mon = dt.toLocaleDateString(undefined, { month: 'short' });
+        const yr = dt.toLocaleDateString(undefined, { year: '2-digit' });
+        return `${day} ${mon} ${yr}`;
+      }
+
+      function asDate(raw) {
+        return parseDateValue(raw);
+      }
+
+      function cloneCsvRows(sourceRows) {
+        if (!Array.isArray(sourceRows)) return [];
+        return sourceRows.map((row) => (Array.isArray(row) ? row.slice() : []));
+      }
+
+      function prepareCsvEditor(sourceRows) {
+        const rows = cloneCsvRows(sourceRows);
+        if (!rows.length) {
+          return { headers: [], rows: [], indexes: {}, map: {} };
+        }
+
+        const headers = rows[0];
+        for (let i = 0; i < headers.length; i += 1) {
+          headers[i] = String(headers[i] ?? '');
+        }
+
+        const map = {};
+        headers.forEach((header, index) => {
+          const key = normHeader(header);
+          if (key) {
+            map[key] = index;
+          }
+        });
+
+        const indexes = {};
+        CSV_EDITOR_COLUMN_SPECS.forEach((spec) => {
+          let targetIndex = null;
+          for (let i = 0; i < spec.match.length; i += 1) {
+            const key = spec.match[i];
+            if (map[key] != null) {
+              targetIndex = map[key];
+              break;
+            }
+          }
+          if (targetIndex != null) {
+            indexes[spec.field] = targetIndex;
+            return;
+          }
+
+          const normalized = normHeader(spec.header);
+          const colIndex = headers.length;
+          headers.push(spec.header);
+          map[normalized] = colIndex;
+          rows.forEach((row, idx) => {
+            if (!Array.isArray(row)) return;
+            if (row.length <= colIndex) {
+              row.length = colIndex + 1;
+            }
+            if (idx === 0) {
+              row[colIndex] = spec.header;
+            } else if (row[colIndex] == null) {
+              row[colIndex] = '';
+            }
+          });
+          indexes[spec.field] = colIndex;
+        });
+
+        return {
+          headers: headers.slice(),
+          rows,
+          indexes,
+          map: { ...map }
+        };
+      }
+
+      function csvEditorCellValue(row, index) {
+        if (!Array.isArray(row) || index == null || index < 0) return '';
+        const value = row[index];
+        return value == null ? '' : String(value);
+      }
+
+      function assessCsvEditorRow(row, indexes) {
+        const result = { fields: {}, hasError: false, hasWarning: false };
+        const mark = (field, status) => {
+          if (!field) return;
+          const existing = result.fields[field];
+          if (existing === 'error' || (existing === 'warning' && status === 'warning')) return;
+          result.fields[field] = status;
+          if (status === 'error') result.hasError = true;
+          if (status === 'warning') result.hasWarning = true;
+        };
+
+        if (indexes.wedate != null) {
+          const value = csvEditorCellValue(row, indexes.wedate).trim();
+          if (!value || !asDate(value)) {
+            mark('wedate', 'error');
+          }
+        }
+
+        if (indexes.value1 != null) {
+          const raw = csvEditorCellValue(row, indexes.value1);
+          if (raw.trim() === '' || parseNumber(raw) == null) {
+            mark('value1', 'error');
+          }
+        }
+
+        CSV_EDITOR_WARNING_FIELDS.forEach((field) => {
+          if (indexes[field] == null) return;
+          const value = csvEditorCellValue(row, indexes[field]).trim();
+          if (!value) {
+            mark(field, 'warning');
+          }
+        });
+
+        return result;
+      }
+
+      function buildCsvEditorRowHtml(row, rowIndex, indexes, assessment) {
+        const rowClass = assessment.hasError ? 'table-danger' : (assessment.hasWarning ? 'table-warning' : '');
+        const cells = CSV_EDITOR_FIELD_ORDER.map((field) => {
+          const idx = indexes[field];
+          const value = csvEditorCellValue(row, idx);
+          const config = CSV_EDITOR_FIELD_CONFIG[field] || { type: 'text', placeholder: '' };
+          const status = assessment.fields[field];
+          let controlClass = 'csv-editor-input';
+          if (status === 'error') {
+            controlClass += ' is-invalid';
+          } else if (status === 'warning') {
+            controlClass += ' csv-editor-warning';
+          }
+
+          if (config.type === 'textarea') {
+            return `<td><textarea class="form-control form-control-sm ${controlClass}" data-row-index="${rowIndex}" data-col-index="${idx}" data-field="${field}" rows="${config.rows || 2}" placeholder="${escapeHtml(config.placeholder)}">${escapeHtml(value)}</textarea></td>`;
+          }
+
+          const extras = [];
+          if (config.step) extras.push(`step="${config.step}"`);
+          if (config.inputmode) extras.push(`inputmode="${config.inputmode}"`);
+
+          return `<td><input type="${config.type}" class="form-control form-control-sm ${controlClass}" data-row-index="${rowIndex}" data-col-index="${idx}" data-field="${field}" value="${escapeHtml(value)}" placeholder="${escapeHtml(config.placeholder)}" ${extras.join(' ')} /></td>`;
+        }).join('');
+
+        return `
+              <tr class="${rowClass}" data-row-index="${rowIndex}">
+                <td class="fw-semibold text-muted">${rowIndex}</td>
+                ${cells}
+              </tr>`;
+      }
+
+      function renderCsvEditorTable(focusState = null) {
+        if (!csvEditorWorking || !model || !model.csvEditor || !csvEditorTableBody) return;
+        const indexes = model.csvEditor.indexes || {};
+        const showGaps = !!csvEditorFilters.showGaps;
+        const searchTerm = (csvEditorFilters.search || '').trim().toLowerCase();
+        const totalColumns = CSV_EDITOR_FIELD_ORDER.length + 1;
+        const rows = csvEditorWorking;
+        let html = '';
+        let errorRows = 0;
+        let warningOnlyRows = 0;
+        let rendered = 0;
+
+        for (let i = 1; i < rows.length; i += 1) {
+          const row = rows[i] || [];
+          const assessment = assessCsvEditorRow(row, indexes);
+          if (assessment.hasError) errorRows += 1;
+          else if (assessment.hasWarning) warningOnlyRows += 1;
+
+          const needsAttention = assessment.hasError || assessment.hasWarning;
+          if (showGaps && !needsAttention) continue;
+
+          if (searchTerm) {
+            const haystack = row
+              .map((cell) => (cell == null ? '' : String(cell).toLowerCase()))
+              .join(' ');
+            if (!haystack.includes(searchTerm)) continue;
+          }
+
+          rendered += 1;
+          html += buildCsvEditorRowHtml(row, i, indexes, assessment);
+        }
+
+        if (!rendered) {
+          html = `<tr><td colspan="${totalColumns}" class="py-4 text-center text-muted">No rows match the current filters.</td></tr>`;
+        }
+
+        csvEditorTableBody.innerHTML = html;
+
+        if (csvEditorRecordCount) csvEditorRecordCount.textContent = Math.max(rows.length - 1, 0);
+        if (csvEditorErrorCount) csvEditorErrorCount.textContent = errorRows;
+        if (csvEditorWarningCount) csvEditorWarningCount.textContent = warningOnlyRows;
+
+        updateCsvEditorApplyState();
+
+        if (focusState && focusState.rowIndex != null && focusState.field) {
+          const selector = `[data-row-index="${focusState.rowIndex}"][data-field="${focusState.field}"]`;
+          const target = csvEditorTableBody.querySelector(selector);
+          if (target) {
+            target.focus({ preventScroll: false });
+            if (focusState.selectionStart != null && focusState.selectionEnd != null) {
+              try {
+                target.setSelectionRange(focusState.selectionStart, focusState.selectionEnd);
+              } catch (err) {
+                // ignore selection errors on unsupported inputs
+              }
+            }
+          }
+        }
+      }
+
+      function updateCsvEditorApplyState() {
+        if (csvEditorApplyBtn) {
+          csvEditorApplyBtn.disabled = !csvEditorDirty;
+        }
+      }
+
+      function clearCsvEditorAlert() {
+        if (csvEditorAlert) {
+          csvEditorAlert.innerHTML = '';
+        }
+      }
+
+      function setCsvEditorAlert(message, type = 'info') {
+        if (!csvEditorAlert) return;
+        if (!message) {
+          csvEditorAlert.innerHTML = '';
+          return;
+        }
+        csvEditorAlert.innerHTML = `
+          <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`;
+      }
+
+      function openCsvEditor() {
+        if (!model || !model.csvEditor || !model.csvEditor.rows.length) {
+          showStatus('Load a CSV file before opening the editor.', 'info');
+          return;
+        }
+        csvEditorWorking = cloneCsvRows(model.csvEditor.rows);
+        csvEditorDirty = false;
+        csvEditorFilters.showGaps = !!model.graphOnly;
+        csvEditorFilters.search = '';
+        if (csvEditorShowGaps) csvEditorShowGaps.checked = csvEditorFilters.showGaps;
+        if (csvEditorSearchInput) csvEditorSearchInput.value = '';
+        clearCsvEditorAlert();
+        renderCsvEditorTable();
+        updateCsvEditorApplyState();
+        if (!csvEditorModal && csvEditorModalEl && window.bootstrap) {
+          csvEditorModal = new window.bootstrap.Modal(csvEditorModalEl);
+        }
+        if (csvEditorModal) {
+          csvEditorModal.show();
+        }
+      }
+
+      function handleCsvEditorInput(event) {
+        const target = event.target;
+        if (!target || !target.classList || !target.classList.contains('csv-editor-input')) return;
+        if (!csvEditorWorking) return;
+        const rowIndex = Number(target.dataset.rowIndex);
+        const colIndex = Number(target.dataset.colIndex);
+        if (Number.isNaN(rowIndex) || Number.isNaN(colIndex)) return;
+        const value = target.value;
+        if (!Array.isArray(csvEditorWorking[rowIndex])) {
+          csvEditorWorking[rowIndex] = [];
+        }
+        csvEditorWorking[rowIndex][colIndex] = value;
+        csvEditorDirty = true;
+        const focusState = {
+          rowIndex,
+          field: target.dataset.field || '',
+          selectionStart: target.selectionStart != null ? target.selectionStart : null,
+          selectionEnd: target.selectionEnd != null ? target.selectionEnd : null
+        };
+        renderCsvEditorTable(focusState);
+      }
+
+      function validateCsvEditorWorking() {
+        if (!csvEditorWorking || !model || !model.csvEditor) {
+          return { errors: [], warnings: [] };
+        }
+        const indexes = model.csvEditor.indexes || {};
+        const errors = [];
+        const warnings = [];
+        for (let i = 1; i < csvEditorWorking.length; i += 1) {
+          const row = csvEditorWorking[i] || [];
+          const assessment = assessCsvEditorRow(row, indexes);
+          if (assessment.hasError) {
+            const fields = Object.entries(assessment.fields)
+              .filter(([, status]) => status === 'error')
+              .map(([field]) => CSV_EDITOR_FIELD_LABELS[field] || field);
+            errors.push({ rowIndex: i, fields });
+          } else if (assessment.hasWarning) {
+            const fields = Object.entries(assessment.fields)
+              .filter(([, status]) => status === 'warning')
+              .map(([field]) => CSV_EDITOR_FIELD_LABELS[field] || field);
+            warnings.push({ rowIndex: i, fields });
+          }
+        }
+        return { errors, warnings };
+      }
+
+      function applyCsvEditorChanges() {
+        if (!model || !model.csvEditor || !csvEditorWorking) return;
+        const validation = validateCsvEditorWorking();
+        if (validation.errors.length) {
+          const preview = validation.errors
+            .slice(0, 5)
+            .map((entry) => `Row ${entry.rowIndex}: ${escapeHtml(entry.fields.join(', '))}`)
+            .join('<br>');
+          setCsvEditorAlert(`Please correct the highlighted date or value fields before applying.<br>${preview}`, 'danger');
+          csvEditorFilters.showGaps = true;
+          if (csvEditorShowGaps) csvEditorShowGaps.checked = true;
+          renderCsvEditorTable();
+          return;
+        }
+
+        const updatedRows = cloneCsvRows(csvEditorWorking);
+        const previousSettings = model && model.settings ? JSON.parse(JSON.stringify(model.settings)) : null;
+
+        try {
+          const rebuilt = buildModel(updatedRows);
+          if (previousSettings) {
+            const fallbackName = rebuilt.graphOnly
+              ? (previousSettings.graphFallbackDivisionName ?? rebuilt.settings.graphFallbackDivisionName)
+              : (rebuilt.settings.graphFallbackDivisionName ?? previousSettings.graphFallbackDivisionName ?? '');
+            rebuilt.settings = {
+              ...rebuilt.settings,
+              defaultThemeKey: previousSettings.defaultThemeKey ?? rebuilt.settings.defaultThemeKey,
+              defaultCustomAccent: previousSettings.defaultCustomAccent ?? rebuilt.settings.defaultCustomAccent,
+              graphFallbackDivisionName: fallbackName
+            };
+          }
+
+          model = rebuilt;
+          model.csvEditor = prepareCsvEditor(updatedRows);
+          csvEditorWorking = null;
+          csvEditorDirty = false;
+          clearCsvEditorAlert();
+          updateCsvEditorApplyState();
+
+          const refreshedFallback = (model.settings?.graphFallbackDivisionName ?? '').trim();
+          if (fallbackDivisionInput) {
+            fallbackDivisionInput.value = refreshedFallback;
+          }
+          applyFallbackDivisionLabel(refreshedFallback);
+
+          refreshDefaultThemeLabel();
+          renderDivisions();
+          generateBtn.disabled = !model || model.graphOnly;
+          if (generateGraphsBtn) generateGraphsBtn.disabled = false;
+
+          if (csvEditorModal) {
+            csvEditorModal.hide();
+          }
+
+          showStatus('CSV edits applied. Regenerate the booklet or graphs to review the updates.', 'success');
+        } catch (err) {
+          setCsvEditorAlert(escapeHtml(err.message || 'Unable to rebuild data with the current edits.'), 'danger');
+        }
+      }
+
+      function buildModel(rows) {
+        const headers = rows[0].map((h) => String(h ?? ''));
+        const map = {};
+        const unnamedIndices = [];
+        headers.forEach((header, index) => {
+          const key = normHeader(header);
+          if (key) {
+            map[key] = index;
+          } else {
+            unnamedIndices.push(index);
+          }
+        });
+
+        const idxStatbook = map['statbook'] ?? map['statbok'] ?? null;
+        const idxStatDesc = map['statdescription'] ?? map['statdesc'] ?? map['statdescriptionlong'] ?? map['statdescriptionoptionalforprintingonly'] ?? null;
+        const idxStatbookLong = map['statbooklong'] ?? map['statbooklongoptionalforprintingonly'] ?? map['statbooklongoptional'] ?? null;
+        const idxShort = map['shortname'] ?? map['short'] ?? map['statbookshortname'];
+        const idxDate = map['wedate'] ?? map['weekending'] ?? map['date'] ?? map['week'] ?? map['day'];
+        const idxValue1 = map['value1'] ?? map['valueline1'] ?? map['value'];
+        const idxValue2 = map['value2'] ?? map['valueline2'] ?? null;
+        const idxValue3 = map['value3'] ?? map['valueline3'] ?? null;
+        const idxValue4 = map['value4'] ?? map['valueline4'] ?? null;
+        const idxStaff = map['staffmember'] ?? map['staff'] ?? null;
+        const idxPost = map['post'] ?? map['postname'] ?? null;
+        const idxDivision = map['division'] ?? map['div'] ?? null;
+  const idxUpside = map['upsidedown'] ?? map['upsidedownflag'] ?? null;
+  const idxMin = map['min'] ?? map['minimum'] ?? map['statmin'] ?? (unnamedIndices.length ? unnamedIndices[0] : null);
+  const idxMax = map['max'] ?? map['maximum'] ?? map['statmax'] ?? (unnamedIndices.length > 1 ? unnamedIndices[1] : null);
+        const idxPercent = map['ispercent'] ?? map['percent'] ?? null;
+        const idxMoney = map['ismoney'] ?? map['money'] ?? null;
+        const idxColor = map['colorflash'] ?? map['color'] ?? map['palette'] ?? null;
+
+        if (idxDate == null || idxValue1 == null) {
+          throw new Error('CSV must include WE-Date and Value1 columns.');
+        }
+
+  const hasDivisionColumn = idxDivision != null;
+  const configuredFallback = (fallbackDivisionName ?? '').trim();
+  const effectiveFallbackDivision = configuredFallback;
+
+  const divisionMap = new Map();
+  const divisionOrder = [];
+        const globalDates = [];
+        const carryForward = {
+          division: '',
+          staffName: '',
+          postName: '',
+          statbook: '',
+          statdesc: '',
+          statbookLong: '',
+          shortName: '',
+          upsideDown: null,
+          min: null,
+          max: null
+        };
+
+        const readTextValue = (row, idx, key) => {
+          if (idx == null || idx >= row.length) {
+            return carryForward[key] ?? '';
+          }
+          const raw = row[idx];
+          const value = raw == null ? '' : String(raw).trim();
+          if (!value) {
+            return carryForward[key] ?? '';
+          }
+          carryForward[key] = value;
+          return value;
+        };
+
+        const readNumericValue = (row, idx, key) => {
+          if (idx == null || idx >= row.length) {
+            return carryForward[key] ?? null;
+          }
+          const raw = row[idx];
+          if (raw == null || raw === '') {
+            return carryForward[key] ?? null;
+          }
+          const num = parseNumber(raw);
+          if (num == null) {
+            return carryForward[key] ?? null;
+          }
+          carryForward[key] = num;
+          return num;
+        };
+
+        const readBoolValue = (row, idx, key, defaultValue = false) => {
+          if (idx == null || idx >= row.length) {
+            return carryForward[key] != null ? carryForward[key] : defaultValue;
+          }
+          const raw = row[idx];
+          const str = raw == null ? '' : String(raw).trim();
+          if (!str) {
+            return carryForward[key] != null ? carryForward[key] : defaultValue;
+          }
+          const value = toBool(str);
+          carryForward[key] = value;
+          return value;
+        };
+
+        let lastStatFingerprint = null;
+
+        for (let r = 1; r < rows.length; r += 1) {
+          const row = rows[r];
+          if (!row || !row.length) continue;
+          const hasContent = row.some((cell) => cell != null && String(cell).trim() !== '');
+          if (!hasContent) continue;
+
+          const statbook = idxStatbook != null ? readTextValue(row, idxStatbook, 'statbook') : readTextValue(row, null, 'statbook');
+          const statDesc = idxStatDesc != null ? readTextValue(row, idxStatDesc, 'statdesc') : readTextValue(row, null, 'statdesc');
+          const statbookLong = idxStatbookLong != null ? readTextValue(row, idxStatbookLong, 'statbookLong') : readTextValue(row, null, 'statbookLong');
+          const shortName = idxShort != null ? readTextValue(row, idxShort, 'shortName') : readTextValue(row, null, 'shortName');
+
+          const statFingerprint = [statbook, shortName, statDesc, statbookLong].filter(Boolean).join('||') || `row-${r}`;
+          if (statFingerprint !== lastStatFingerprint) {
+            carryForward.min = null;
+            carryForward.max = null;
+            carryForward.upsideDown = null;
+            lastStatFingerprint = statFingerprint;
+          }
+
+          let rawDivisionName = '';
+          if (hasDivisionColumn) {
+            const rawDivision = idxDivision != null && idxDivision < row.length ? row[idxDivision] : '';
+            rawDivisionName = rawDivision == null ? '' : String(rawDivision).trim();
+          } else {
+            rawDivisionName = '';
+            carryForward.division = effectiveFallbackDivision;
+          }
+
+          const divisionKey = hasDivisionColumn ? rawDivisionName : '__graph__division__';
+          const initialDisplayName = rawDivisionName || (hasDivisionColumn ? '' : (effectiveFallbackDivision || ''));
+
+          if (!divisionMap.has(divisionKey)) {
+            divisionMap.set(divisionKey, {
+              key: divisionKey,
+              name: initialDisplayName,
+              originalName: rawDivisionName,
+              synthetic: !hasDivisionColumn,
+              graphOnly: !hasDivisionColumn,
+              staffOrder: [],
+              staffMap: new Map(),
+              colorHints: [],
+              staff: [],
+              color: null,
+              vfpText: !hasDivisionColumn ? '' : (rawDivisionName ? VFP_TEXT[rawDivisionName.toUpperCase().replace(/[^A-Z]/g, '')] || '' : ''),
+              vfpScale: 'normal',
+              vfpAlign: 'center',
+              vfpWidth: 'wide',
+              vfpFont: 'large',
+              customAccent: null
+            });
+            divisionOrder.push(divisionKey);
+          }
+
+          const division = divisionMap.get(divisionKey);
+          if (division && !division.originalName) {
+            division.originalName = rawDivisionName;
+          }
+
+          if (idxColor != null && row[idxColor]) {
+            division.colorHints.push(row[idxColor]);
+          }
+
+          let staffName;
+          if (idxStaff == null) {
+            staffName = readTextValue(row, idxStaff, 'staffName');
+          } else {
+            const rawStaff = idxStaff < row.length ? row[idxStaff] : '';
+            staffName = rawStaff == null ? '' : String(rawStaff).trim();
+          }
+
+          let postName;
+          if (idxPost == null) {
+            postName = readTextValue(row, idxPost, 'postName');
+          } else {
+            const rawPost = idxPost < row.length ? row[idxPost] : '';
+            postName = rawPost == null ? '' : String(rawPost).trim();
+          }
+
+          const hasStaffDetails = Boolean(staffName || postName);
+
+          let staffKey;
+          if (hasDivisionColumn) {
+            staffKey = `${staffName}||${postName}`;
+          } else if (hasStaffDetails) {
+            staffKey = `${staffName}||${postName}`;
+          } else {
+            staffKey = '__graph__staff__';
+            staffName = '';
+            postName = '';
+          }
+
+          if (!division.staffMap.has(staffKey)) {
+            const syntheticStaff = !hasDivisionColumn && !hasStaffDetails;
+            const staffObj = {
+              staffName,
+              post: postName,
+              originalStaffName: staffName,
+              originalPost: postName,
+              synthetic: syntheticStaff,
+              statsMap: new Map(),
+              statOrder: [],
+              stats: [],
+              selected: new Set()
+            };
+            division.staffMap.set(staffKey, staffObj);
+            division.staffOrder.push(staffKey);
+          }
+
+          const staffObj = division.staffMap.get(staffKey);
+          if (!hasDivisionColumn) {
+            staffObj.staffName = staffName;
+            staffObj.post = postName;
+          }
+          if (!staffObj.originalStaffName && staffName) {
+            staffObj.originalStaffName = staffName;
+          }
+          if (!staffObj.originalPost && postName) {
+            staffObj.originalPost = postName;
+          }
+          if (hasStaffDetails) {
+            staffObj.synthetic = false;
+          }
+
+          const displayName = statbookLong || statDesc || (statbook && shortName ? `${statbook} — ${shortName}` : shortName || statbook || 'Stat');
+          const checkboxLabel = shortName || statbook || statbookLong || displayName;
+          const statKeyBase = [statbook, shortName, statDesc || statbookLong].filter(Boolean).join(' • ');
+          const statKey = statKeyBase || `STAT-${staffObj.statOrder.length + 1}`;
+
+          if (!staffObj.statsMap.has(statKey)) {
+            const statObj = {
+              key: statKey,
+              statbook,
+              statbookLong,
+              shortName,
+              statdesc: statDesc,
+              displayName,
+              checkboxLabel,
+              dates: [],
+              dateObjs: [],
+              values: [[], [], [], []],
+              upsideDown: false,
+              min: null,
+              max: null,
+              isPercent: false,
+              isMoney: false
+            };
+            staffObj.statsMap.set(statKey, statObj);
+            staffObj.statOrder.push(statKey);
+          }
+
+          const statObj = staffObj.statsMap.get(statKey);
+          const rawDate = row[idxDate];
+          statObj.dates.push(fmtDateLabel(rawDate));
+          const dateObj = asDate(rawDate);
+          statObj.dateObjs.push(dateObj);
+          if (dateObj) globalDates.push(dateObj);
+
+          const v1 = parseNumber(row[idxValue1]);
+          const v2 = idxValue2 != null ? parseNumber(row[idxValue2]) : null;
+          const v3 = idxValue3 != null ? parseNumber(row[idxValue3]) : null;
+          const v4 = idxValue4 != null ? parseNumber(row[idxValue4]) : null;
+
+          statObj.values[0].push(v1);
+          statObj.values[1].push(v2);
+          statObj.values[2].push(v3);
+          statObj.values[3].push(v4);
+
+          if (idxUpside != null) {
+            statObj.upsideDown = readBoolValue(row, idxUpside, 'upsideDown', false);
+          }
+          if (idxMin != null) {
+            const minValue = readNumericValue(row, idxMin, 'min');
+            if (minValue != null) statObj.min = minValue;
+          }
+          if (idxMax != null) {
+            const maxValue = readNumericValue(row, idxMax, 'max');
+            if (maxValue != null) statObj.max = maxValue;
+          }
+          if (idxPercent != null) {
+            statObj.isPercent = readBoolValue(row, idxPercent, 'isPercent', false);
+          }
+          if (idxMoney != null) {
+            statObj.isMoney = readBoolValue(row, idxMoney, 'isMoney', false);
+          }
+        }
+
+        const divisions = divisionOrder.map((key, idx) => {
+          const division = divisionMap.get(key);
+          const baseLabel = division.originalName || '';
+          const fallbackLabel = division.synthetic ? (effectiveFallbackDivision || '') : '';
+          division.name = baseLabel || fallbackLabel;
+          const colorToken = division.colorHints[0] || baseLabel || `division-${idx + 1}`;
+          const theme = chooseColor(colorToken, idx);
+          division.colorKey = theme.key;
+          division.color = { ...theme };
+          if (division.customAccent) {
+            const palette = paletteFromAccent(division.customAccent);
+            if (palette) {
+              division.color = { ...division.color, ...palette, key: division.colorKey };
+              division.customAccent = palette.accent;
+            } else {
+              division.customAccent = null;
+            }
+          } else if (defaultCustomAccent) {
+            const palette = paletteFromAccent(defaultCustomAccent);
+            if (palette) {
+              division.color = { ...division.color, ...palette, key: division.colorKey };
+              division.customAccent = palette.accent;
+            }
+          }
+          division.staff = division.staffOrder.map((key) => {
+            const staff = division.staffMap.get(key);
+            staff.stats = staff.statOrder.map((statKey) => staff.statsMap.get(statKey));
+            if (!staff.selected || !(staff.selected instanceof Set)) {
+              staff.selected = new Set();
+            }
+            staff.selected = new Set(staff.statOrder);
+            return staff;
+          });
+          return division;
+        });
+
+        let earliest = null;
+        let latest = null;
+        globalDates.forEach((dt) => {
+          if (!dt) return;
+          if (!earliest || dt < earliest) earliest = dt;
+          if (!latest || dt > latest) latest = dt;
+        });
+
+        return {
+          divisions,
+          earliest,
+          latest,
+          graphOnly: !hasDivisionColumn,
+          settings: {
+            defaultThemeKey,
+            defaultCustomAccent,
+            graphFallbackDivisionName: !hasDivisionColumn ? effectiveFallbackDivision : (fallbackDivisionName ?? '').trim()
+          }
+        };
+      }
+
+      function applyFallbackDivisionLabel(label) {
+        const applied = (label ?? '').trim();
+        if (!model || !Array.isArray(model.divisions)) {
+          fallbackDivisionName = applied;
+          if (fallbackDivisionInput && fallbackDivisionInput.value !== applied) {
+            fallbackDivisionInput.value = applied;
+          }
+          return;
+        }
+        if (!model.settings) {
+          model.settings = {};
+        }
+        model.settings.graphFallbackDivisionName = applied;
+        fallbackDivisionName = applied;
+        if (fallbackDivisionInput && fallbackDivisionInput.value !== applied) {
+          fallbackDivisionInput.value = applied;
+        }
+        model.divisions.forEach((division) => {
+          if (!division) return;
+          const originalLabel = typeof division.originalName === 'string' ? division.originalName.trim() : '';
+          division.name = originalLabel || (division.synthetic ? applied : '');
+          division.staff.forEach((staff) => {
+            if (!staff) return;
+            const staffOriginalName = typeof staff.originalStaffName === 'string' ? staff.originalStaffName : '';
+            const staffOriginalPost = typeof staff.originalPost === 'string' ? staff.originalPost : '';
+            if (staffOriginalName || staffOriginalPost) {
+              staff.staffName = staffOriginalName;
+              staff.post = staffOriginalPost;
+              return;
+            }
+
+            if (division.synthetic || staff.synthetic) {
+              staff.staffName = applied;
+              if (staff.synthetic) {
+                staff.post = '';
+              }
+            } else {
+              staff.staffName = '';
+              staff.post = '';
+            }
+          });
+        });
+      }
+
+      function renderDivisions(preserveOpen = false) {
+        if (!model || !model.divisions.length) {
+          divisionContainer.innerHTML = `
+            <div class="text-center text-muted py-5">
+              <i class="bi bi-diagram-3 fs-1 mb-3"></i>
+              <div class="fw-semibold">No stats selected yet.</div>
+              <div class="small">Load a CSV to manage divisions, staff and stats.</div>
+            </div>`;
+          updateSummary();
+          return;
+        }
+
+        const openIds = preserveOpen
+          ? new Set(Array.from(divisionContainer.querySelectorAll('.accordion-collapse.show')).map((el) => el.id))
+          : new Set();
+
+        const graphOnlyNotice = model.graphOnly
+          ? `<div class="alert alert-warning d-flex align-items-center gap-2" role="alert">
+              <i class="bi bi-bar-chart-line"></i>
+              <div>This CSV does not include a Division column, so Staff Meeting pages are disabled. Adjust the graph label above if needed.</div>
+            </div>`
+          : '';
+
+        const html = model.divisions
+          .map((division, di) => {
+            const selectedStats = division.staff.reduce((acc, staff) => acc + staff.selected.size, 0);
+            const staffCount = division.staff.length;
+            const badgeText = `${selectedStats} stat${selectedStats !== 1 ? 's' : ''}`;
+            const accentColor = (division?.color?.accent && String(division.color.accent).trim()) || '#2563eb';
+            const accentRgb = hexToRgb(accentColor);
+            const accentRgbString = accentRgb ? `${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}` : '37, 99, 235';
+            const swatchBase = (division?.color?.base && String(division.color.base).trim()) || accentColor;
+            const swatchBorder = (division?.color?.border && String(division.color.border).trim()) || accentColor;
+            const swatch = `<button type="button" class="color-chip-btn me-2" data-action="division-color" data-di="${di}" title="Change division color" aria-label="Change ${escapeHtml(division.name)} division color" style="background:${swatchBase};border-color:${swatchBorder}"></button>`;
+
+            const staffHtml = division.staff
+              .map((staff, si) => {
+                const collapseId = `collapse-${di}-${si}`;
+                const headingId = `heading-${di}-${si}`;
+                const isOpen = openIds.has(collapseId) || (si === 0 && division.staff.length <= 3);
+                const staffTitle = staff.staffName || staff.post || '';
+                const staffSubtitle = staff.post && staff.staffName ? `${staff.post} • ${staff.staffName}` : staff.post || staff.staffName || '';
+                const statCountId = `statCount-${di}-${si}`;
+
+                const statsHtml = staff.stats
+                  .map((stat, ti) => {
+                    const primaryTitle = resolveStatTitle(stat);
+                    const secondaryTitle = resolveStatSubtitle(stat);
+                    return `
+                          <div class="form-check" draggable="true" data-drag-type="stat" data-di="${di}" data-si="${si}" data-stat-index="${ti}" data-drag-handle="stat">
+                            <span class="drag-handle" data-drag-handle="stat" title="Drag to reorder stats"><i class="bi bi-grip-vertical"></i></span>
+                            <input class="form-check-input stat-checkbox" type="checkbox" value="${escapeHtml(stat.key)}" data-di="${di}" data-si="${si}" data-index="${ti}" data-key="${escapeHtml(stat.key)}" ${
+                      staff.selected.has(stat.key) ? 'checked' : ''
+                    } />
+                        <label class="form-check-label stat-label">
+                          <span>${escapeHtml(primaryTitle)}</span>
+                          ${secondaryTitle ? `<small>${escapeHtml(secondaryTitle)}</small>` : ''}
+                        </label>
+                      </div>`
+                  })
+                  .join('');
+
+                return `
+                  <div class="accordion-item" data-di="${di}" data-si="${si}" data-drag-type="staff" data-index="${si}" data-drag-handle="staff" draggable="true">
+                    <h2 class="accordion-header" id="${headingId}">
+                      <button class="accordion-button ${isOpen ? '' : 'collapsed'}" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="${isOpen}" aria-controls="${collapseId}">
+                        <div class="d-flex align-items-start gap-2 w-100">
+                          <span class="drag-handle mt-1" data-drag-handle="staff" title="Drag to reorder staff"><i class="bi bi-grip-vertical"></i></span>
+                          <div class="d-flex flex-column flex-grow-1">
+                            <span class="fw-semibold">${escapeHtml(staffTitle)}</span>
+                            ${staffSubtitle ? `<small class="text-muted">${escapeHtml(staffSubtitle)}</small>` : ''}
+                          </div>
+                        </div>
+                      </button>
+                    </h2>
+                    <div id="${collapseId}" class="accordion-collapse collapse ${isOpen ? 'show' : ''}" aria-labelledby="${headingId}" data-bs-parent="#accordion-${di}">
+                      <div class="accordion-body">
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                          <span class="badge badge-light" id="${statCountId}">${staff.selected.size}/${staff.stats.length} selected</span>
+                          <div class="btn-group btn-group-sm">
+                            <button type="button" class="btn btn-outline-secondary" data-action="staff-up" data-di="${di}" data-si="${si}">
+                              <i class="bi bi-arrow-up"></i>
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary" data-action="staff-down" data-di="${di}" data-si="${si}">
+                              <i class="bi bi-arrow-down"></i>
+                            </button>
+                          </div>
+                        </div>
+                        <div class="d-flex justify-content-end gap-2 mb-2 flex-wrap">
+                          <button type="button" class="btn btn-outline-success btn-sm" data-action="select-all" data-di="${di}" data-si="${si}">Select all</button>
+                          <button type="button" class="btn btn-outline-danger btn-sm" data-action="clear-stats" data-di="${di}" data-si="${si}">Clear</button>
+                        </div>
+                        <div class="stat-grid">
+                          ${statsHtml}
+                        </div>
+                      </div>
+                    </div>
+                  </div>`;
+              })
+              .join('');
+
+            return `
+              <div class="card division-card" data-di="${di}" data-drag-type="division" data-index="${di}" data-drag-handle="division" draggable="true" style="--division-accent:${accentColor};--division-accent-rgb:${accentRgbString};">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="drag-handle" data-drag-handle="division" title="Drag to reorder divisions"><i class="bi bi-grip-vertical"></i></span>
+                    ${swatch}
+                    <div>
+                      <div class="fw-semibold text-uppercase">${escapeHtml(division.name)}</div>
+                      <small class="text-muted">${staffCount} staff • ${badgeText}</small>
+                    </div>
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-action="division-settings" data-di="${di}" title="Customize division">
+                      <i class="bi bi-sliders"></i>
+                    </button>
+                    <div class="btn-group division-controls">
+                      <button type="button" class="btn btn-outline-secondary btn-sm" data-action="div-up" data-di="${di}">
+                        <i class="bi bi-arrow-up"></i>
+                      </button>
+                      <button type="button" class="btn btn-outline-secondary btn-sm" data-action="div-down" data-di="${di}">
+                        <i class="bi bi-arrow-down"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="card-body">
+                  ${division.staff.length ? `<div class="accordion" id="accordion-${di}">${staffHtml}</div>` : '<div class="text-muted">No staff records in this division.</div>'}
+                </div>
+              </div>`;
+          })
+          .join('');
+
+        divisionContainer.innerHTML = graphOnlyNotice + html;
+        updateSummary();
+      }
+
+      function handleCsvChange(event) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const text = e.target.result;
+            graphModeCsvText = typeof text === 'string' ? text : '';
+            clearStatus();
+            const parsed = Papa.parse(text, { skipEmptyLines: true });
+            if (!parsed.data || parsed.data.length < 2) {
+              throw new Error('CSV must have a header row and at least one data row.');
+            }
+            model = buildModel(parsed.data);
+            model.csvEditor = prepareCsvEditor(parsed.data);
+            if (!model.settings) {
+              model.settings = { defaultThemeKey, defaultCustomAccent };
+            }
+            if (model.settings.defaultThemeKey && COLOR_KEYS.includes(model.settings.defaultThemeKey)) {
+              defaultThemeKey = model.settings.defaultThemeKey;
+              if (defaultThemeSelect) {
+                defaultThemeSelect.value = defaultThemeKey;
+              }
+            }
+            if (model.settings.defaultCustomAccent) {
+              const palette = paletteFromAccent(model.settings.defaultCustomAccent);
+              defaultCustomAccent = palette ? palette.accent : null;
+            } else {
+              defaultCustomAccent = null;
+            }
+            model.settings.defaultThemeKey = defaultThemeKey;
+            model.settings.defaultCustomAccent = defaultCustomAccent;
+            const persistedFallbackRaw = model.settings.graphFallbackDivisionName;
+            const appliedFallback = ((persistedFallbackRaw != null ? persistedFallbackRaw : fallbackDivisionName) ?? '').trim();
+            fallbackDivisionName = appliedFallback;
+            model.settings.graphFallbackDivisionName = appliedFallback;
+            if (fallbackDivisionInput) {
+              fallbackDivisionInput.value = appliedFallback;
+            }
+            applyFallbackDivisionLabel(appliedFallback);
+            refreshDefaultThemeLabel();
+            renderDivisions();
+            generateBtn.disabled = !model || model.graphOnly;
+            if (generateGraphsBtn) generateGraphsBtn.disabled = false;
+            if (editCsvBtn) editCsvBtn.disabled = false;
+            csvEditorWorking = null;
+            csvEditorDirty = false;
+            csvEditorFilters.showGaps = !!model.graphOnly;
+            csvEditorFilters.search = '';
+            if (csvEditorShowGaps) csvEditorShowGaps.checked = csvEditorFilters.showGaps;
+            if (csvEditorSearchInput) csvEditorSearchInput.value = '';
+            clearCsvEditorAlert();
+            updateCsvEditorApplyState();
+            const modeNote = model.graphOnly ? ' <span class="badge bg-warning text-dark ms-2">Graph mode only</span>' : '';
+            showStatus(`Loaded CSV file: <strong>${escapeHtml(file.name)}</strong>${modeNote}`, 'success');
+          } catch (err) {
+            model = null;
+            renderDivisions();
+            generateBtn.disabled = true;
+            if (generateGraphsBtn) generateGraphsBtn.disabled = true;
+            if (editCsvBtn) editCsvBtn.disabled = true;
+            csvEditorWorking = null;
+            csvEditorDirty = false;
+            clearCsvEditorAlert();
+            updateCsvEditorApplyState();
+            showStatus(err.message || 'Unable to parse CSV file.', 'danger');
+          }
+        };
+        reader.onerror = () => {
+          showStatus('Unable to read the selected CSV file.', 'danger');
+        };
+        reader.readAsText(file);
+      }
+
+      function handleLogoChange(event) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          logoDataURL = e.target.result;
+          logoPreview.src = logoDataURL;
+          logoPreview.classList.remove('d-none');
+          logoPlaceholder.classList.add('d-none');
+        };
+        reader.onerror = () => showStatus('Unable to read the selected logo file.', 'warning');
+        reader.readAsDataURL(file);
+      }
+
+      function handleDivisionClick(event) {
+        const button = event.target.closest('button[data-action]');
+        if (!button || !model) return;
+        const action = button.dataset.action;
+        const di = Number(button.dataset.di);
+        const si = Number(button.dataset.si);
+
+        if (action === 'division-color') {
+          openDivisionSettings(di, 'color');
+        } else if (action === 'div-up' && di > 0) {
+          [model.divisions[di - 1], model.divisions[di]] = [model.divisions[di], model.divisions[di - 1]];
+          renderDivisions(true);
+        } else if (action === 'div-down' && di < model.divisions.length - 1) {
+          [model.divisions[di + 1], model.divisions[di]] = [model.divisions[di], model.divisions[di + 1]];
+          renderDivisions(true);
+        } else if (action === 'division-settings') {
+          openDivisionSettings(di);
+        } else if ((action === 'staff-up' || action === 'staff-down') && !Number.isNaN(si)) {
+          const division = model.divisions[di];
+          if (!division) return;
+          if (action === 'staff-up' && si > 0) {
+            [division.staff[si - 1], division.staff[si]] = [division.staff[si], division.staff[si - 1]];
+            renderDivisions(true);
+          } else if (action === 'staff-down' && si < division.staff.length - 1) {
+            [division.staff[si + 1], division.staff[si]] = [division.staff[si], division.staff[si + 1]];
+            renderDivisions(true);
+          }
+        } else if (action === 'select-all' && !Number.isNaN(si)) {
+          const division = model.divisions[di];
+          if (!division) return;
+          const staff = division.staff[si];
+          staff.selected = new Set(staff.stats.map((stat) => stat.key));
+          renderDivisions(true);
+        } else if (action === 'clear-stats' && !Number.isNaN(si)) {
+          const division = model.divisions[di];
+          if (!division) return;
+          const staff = division.staff[si];
+          staff.selected.clear();
+          renderDivisions(true);
+        }
+      }
+
+      function handleDivisionChange(event) {
+        const target = event.target;
+        if (!target.classList.contains('stat-checkbox') || !model) return;
+        const di = Number(target.dataset.di);
+        const si = Number(target.dataset.si);
+        const key = target.dataset.key;
+        const division = model.divisions[di];
+        if (!division) return;
+        const staff = division.staff[si];
+        if (!staff) return;
+        if (target.checked) {
+          staff.selected.add(key);
+        } else {
+          staff.selected.delete(key);
+        }
+        const badge = document.getElementById(`statCount-${di}-${si}`);
+        if (badge) {
+          badge.textContent = `${staff.selected.size}/${staff.stats.length} selected`;
+        }
+        updateSummary();
+      }
+
+      function openDivisionSettings(di, focusField = null) {
+        if (!divisionModal || !model) return;
+        const division = model.divisions[di];
+        if (!division) return;
+        editingDivisionIndex = di;
+        divisionModalFocusField = focusField;
+        if (divisionNameDisplay) {
+          divisionNameDisplay.value = division.name;
+        }
+        if (divisionVfpInput) {
+          divisionVfpInput.value = division.vfpText || '';
+        }
+        if (divisionColorSelect) {
+          const key = division.colorKey || (division.color ? division.color.key : null) || COLOR_KEYS[0];
+          divisionColorSelect.value = key;
+        }
+        if (divisionCustomColorInput) {
+          if (divisionCustomColorInput.dataset.reset) {
+            delete divisionCustomColorInput.dataset.reset;
+          }
+          const accent = normalizeHexColor(division.customAccent || (division.color ? division.color.accent : null)) || '#1D4ED8';
+          divisionCustomColorInput.value = accent;
+          divisionCustomColorInput.dataset.initial = accent;
+        }
+        if (divisionCustomColorDefault) {
+          divisionCustomColorDefault.checked = false;
+        }
+        if (divisionCustomColorReset) {
+          divisionCustomColorReset.disabled = !division.customAccent;
+        }
+        if (divisionVfpScaleSelect) {
+          divisionVfpScaleSelect.value = division.vfpScale || 'normal';
+        }
+        if (divisionVfpAlignSelect) {
+          divisionVfpAlignSelect.value = division.vfpAlign || 'center';
+        }
+        if (divisionVfpWidthSelect) {
+          divisionVfpWidthSelect.value = division.vfpWidth || 'wide';
+        }
+        if (divisionVfpFontSelect) {
+          divisionVfpFontSelect.value = division.vfpFont || 'large';
+        }
+        divisionModal.show();
+      }
+
+      let dragState = null;
+      let currentDragTarget = null;
+
+      function moveArrayItem(list, from, to) {
+        if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return;
+        const [item] = list.splice(from, 1);
+        list.splice(to, 0, item);
+      }
+
+      function clearDragStyles() {
+        if (currentDragTarget) {
+          currentDragTarget.classList.remove('drag-target');
+          currentDragTarget = null;
+        }
+        if (dragState && dragState.element) {
+          dragState.element.classList.remove('dragging');
+        }
+      }
+
+      function handleDragStart(event) {
+        const handle = event.target.closest('[data-drag-handle]');
+        if (!handle) {
+          event.preventDefault();
+          return;
+        }
+        const source = handle.closest('[data-drag-type]');
+        if (!source) return;
+        const type = source.dataset.dragType;
+        dragState = {
+          type,
+          element: source,
+          di: source.dataset.di != null ? Number(source.dataset.di) : null,
+          si: source.dataset.si != null ? Number(source.dataset.si) : null,
+          statIndex: source.dataset.statIndex != null ? Number(source.dataset.statIndex) : null,
+          index: source.dataset.index != null ? Number(source.dataset.index) : null
+        };
+        source.classList.add('dragging');
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', type);
+        }
+      }
+
+      function handleDragOver(event) {
+        if (!dragState) return;
+        const target = event.target.closest('[data-drag-type]');
+        if (!target || target.dataset.dragType !== dragState.type) return;
+        event.preventDefault();
+        if (currentDragTarget !== target) {
+          if (currentDragTarget) {
+            currentDragTarget.classList.remove('drag-target');
+          }
+          currentDragTarget = target;
+          currentDragTarget.classList.add('drag-target');
+        }
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'move';
+        }
+      }
+
+      function handleDrop(event) {
+        if (!dragState) return;
+        const target = event.target.closest('[data-drag-type]');
+        if (!target || target.dataset.dragType !== dragState.type) return;
+        event.preventDefault();
+
+        try {
+          if (dragState.type === 'division') {
+            const from = dragState.di ?? dragState.index ?? 0;
+            const to = target.dataset.di != null ? Number(target.dataset.di) : Number(target.dataset.index);
+            moveArrayItem(model.divisions, from, to);
+            renderDivisions(true);
+          } else if (dragState.type === 'staff') {
+            const di = dragState.di;
+            const targetDivision = Number(target.dataset.di);
+            if (di == null || Number.isNaN(di) || di !== targetDivision) return;
+            const division = model.divisions[di];
+            if (!division) return;
+            const from = dragState.si ?? dragState.index ?? 0;
+            const to = target.dataset.si != null ? Number(target.dataset.si) : Number(target.dataset.index);
+            moveArrayItem(division.staff, from, to);
+            renderDivisions(true);
+          } else if (dragState.type === 'stat') {
+            const di = dragState.di;
+            const si = dragState.si;
+            if (di == null || si == null) return;
+            const targetDi = Number(target.dataset.di);
+            const targetSi = Number(target.dataset.si);
+            if (di !== targetDi || si !== targetSi) return;
+            const division = model.divisions[di];
+            if (!division) return;
+            const staff = division.staff[si];
+            if (!staff) return;
+            const from = dragState.statIndex ?? 0;
+            const to = target.dataset.statIndex != null ? Number(target.dataset.statIndex) : from;
+            moveArrayItem(staff.stats, from, to);
+            renderDivisions(true);
+          }
+        } finally {
+          clearDragStyles();
+          dragState = null;
+        }
+      }
+
+      function handleDragEnd() {
+        clearDragStyles();
+        dragState = null;
+      }
+
+      function buildSeriesPayload(stat) {
+        const names = ['Primary', 'Secondary', 'Tertiary', 'Quaternary'];
+        return stat.values
+          .map((arr, idx) => ({
+            name: names[idx],
+            data: arr.map((v) => toFiniteNumber(v))
+          }))
+          .map((series) => {
+            const finiteValues = (series.data || []).filter((v) => Number.isFinite(v));
+            const min = finiteValues.length ? Math.min(...finiteValues) : null;
+            const max = finiteValues.length ? Math.max(...finiteValues) : null;
+            const decimals = finiteValues.reduce((acc, value) => Math.max(acc, countDecimals(value)), 0);
+            return {
+              ...series,
+              meta: {
+                hasData: finiteValues.length > 0,
+                min,
+                max,
+                decimals
+              }
+            };
+          })
+          .filter((series) => series.meta && series.meta.hasData);
+      }
+
+      function preparePayloadBase() {
+        if (!model || !model.divisions.length) {
+          throw new Error('Load a CSV and select at least one stat before generating.');
+        }
+
+        const divisions = [];
+        let earliest = null;
+        let latest = null;
+
+        model.divisions.forEach((division) => {
+          const staffEntries = [];
+          division.staff.forEach((staff) => {
+            const chosenStats = staff.stats.filter((stat) => staff.selected.has(stat.key));
+            if (!chosenStats.length) return;
+            const statsPayload = chosenStats.map((stat) => {
+              stat.dateObjs.forEach((dt) => {
+                if (dt && (!earliest || dt < earliest)) earliest = dt;
+                if (dt && (!latest || dt > latest)) latest = dt;
+              });
+              const shortTitle = getShortTitle(stat);
+              const longTitle = getLongTitle(stat);
+              const resolvedTitle = resolveStatTitle(stat);
+              const unusedTitle = statTitleMode === 'short' ? longTitle : shortTitle;
+              return {
+                key: stat.key,
+                title: resolvedTitle,
+                displayName: resolvedTitle,
+                statbook: stat.statbook,
+                shortName: stat.shortName,
+                statdesc: stat.statdesc,
+                shortTitle,
+                longTitle,
+                alternateTitle: unusedTitle && unusedTitle !== resolvedTitle ? unusedTitle : '',
+                dates: stat.dates,
+                dateObjs: stat.dateObjs.map((d) => (d ? d.toISOString() : null)),
+                series: buildSeriesPayload(stat),
+                isPercent: stat.isPercent,
+                isMoney: stat.isMoney,
+                min: stat.min,
+                max: stat.max,
+                upsideDown: stat.upsideDown
+              };
+            });
+            staffEntries.push({
+              staffName: staff.staffName,
+              post: staff.post,
+              stats: statsPayload
+            });
+          });
+          if (staffEntries.length) {
+            divisions.push({
+              name: division.name,
+              synthetic: !!division.synthetic,
+              graphOnly: !!division.graphOnly,
+              color: division.color,
+              vfpScale: division.vfpScale || 'normal',
+              vfpAlign: division.vfpAlign || 'center',
+              vfpWidth: division.vfpWidth || 'wide',
+              vfpFont: division.vfpFont || 'large',
+              customAccent: division.customAccent || null,
+              vfpText: division.vfpText,
+              staff: staffEntries
+            });
+          }
+        });
+
+        if (!divisions.length) {
+          throw new Error('Select at least one stat to include.');
+        }
+
+        return { divisions, earliest, latest };
+      }
+
+      function buildBookletPayload() {
+        const { divisions, earliest, latest } = preparePayloadBase();
+        const title = titleInput.value.trim() || 'Weekly BP';
+        const subtitle = subtitleInput.value.trim();
+        return {
+          title,
+          subtitle,
+          logo: logoDataURL,
+          pageSize,
+          showDataLabels,
+          earliest: earliest ? earliest.toISOString() : null,
+          latest: latest ? latest.toISOString() : null,
+          divisions
+        };
+      }
+
+      function buildGraphPayload() {
+        const { divisions, earliest, latest } = preparePayloadBase();
+        const title = titleInput.value.trim() || 'Weekly BP';
+        const subtitle = subtitleInput.value.trim();
+        const payload = {
+          title,
+          subtitle,
+          headingMode: graphHeadingMode,
+          layoutMode: graphLayoutMode,
+          logoMode: graphLogoMode,
+          pageSize,
+          showDataLabels,
+          earliest: earliest ? earliest.toISOString() : null,
+          latest: latest ? latest.toISOString() : null,
+          divisions
+        };
+        if (graphLogoMode === 'show' && logoDataURL) {
+          payload.logo = logoDataURL;
+        }
+        return payload;
+      }
+
+      function buildSettingsSnapshot() {
+        if (!model || !model.divisions.length) {
+          throw new Error('Load a CSV and configure at least one division before saving settings.');
+        }
+        return {
+          version: 1,
+          savedAt: new Date().toISOString(),
+          title: titleInput.value.trim() || null,
+          subtitle: subtitleInput.value.trim() || null,
+          pageSize,
+          showDataLabels,
+          statTitleMode,
+          graphHeadingMode,
+          graphLogoMode,
+          graphLayoutMode,
+          defaultThemeKey,
+          defaultCustomAccent,
+          graphOnly: !!(model && model.graphOnly),
+          graphFallbackDivisionName: model?.settings?.graphFallbackDivisionName ?? (fallbackDivisionName ?? ''),
+          logo: logoDataURL || null,
+          divisions: model.divisions.map((division) => ({
+            name: division.name,
+            colorKey: division.colorKey,
+            customAccent: division.customAccent || null,
+            vfpText: division.vfpText,
+            vfpScale: division.vfpScale,
+            vfpAlign: division.vfpAlign,
+            vfpWidth: division.vfpWidth,
+            vfpFont: division.vfpFont || 'medium',
+            graphOnly: !!division.graphOnly,
+            synthetic: !!division.synthetic
+          }))
+        };
+      }
+
+      function downloadSettings() {
+        try {
+          const snapshot = buildSettingsSnapshot();
+          const json = JSON.stringify(snapshot, null, 2);
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          const stamp = new Date().toISOString().split('T')[0];
+          link.href = url;
+          link.download = `booklet-settings-${stamp}.json`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+          showStatus('Settings downloaded as JSON.', 'success');
+        } catch (error) {
+          showStatus(error.message || 'Unable to prepare settings for download.', 'danger');
+        }
+      }
+
+      const sharedChildRuntimeSource = () => {
+        if (window.__BOOKLET_SHARED_RUNTIME__) return;
+        window.__BOOKLET_SHARED_RUNTIME__ = (() => {
+          const coerceFiniteNumber = (value) => {
+            if (value == null) return null;
+            if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+            if (typeof value === 'string') {
+              const trimmed = value.trim();
+              if (!trimmed) return null;
+              const numeric = Number(trimmed);
+              return Number.isFinite(numeric) ? numeric : null;
+            }
+            if (typeof value === 'boolean') return value ? 1 : 0;
+            if (value instanceof Date) {
+              const time = value.getTime();
+              return Number.isFinite(time) ? time : null;
+            }
+            const numeric = Number(value);
+            return Number.isFinite(numeric) ? numeric : null;
+          };
+
+          if (typeof window.toFiniteNumber !== 'function') {
+            window.toFiniteNumber = coerceFiniteNumber;
+          }
+          const toFiniteNumber = window.toFiniteNumber;
+
+          const TREND_UP = '#0f172a';
+          const TREND_DOWN = '#b91c1c';
+          const CM_TO_PX = 37.7952755906;
+          const MARKER_TICK_LENGTH_PX = Math.round(0.4 * CM_TO_PX);
+          const LABEL_CLEARANCE_PX = Math.max(1, Math.round(0.04 * CM_TO_PX));
+          const LABEL_RISER_OFFSET_PX = MARKER_TICK_LENGTH_PX + LABEL_CLEARANCE_PX;
+          const LABEL_TICK_HEIGHT_PX = Math.max(6, Math.round(MARKER_TICK_LENGTH_PX * 0.5));
+          const DROPLINE_COLOR = 'rgba(15,23,42,0.18)';
+          const measurementConstants = {
+            CM_TO_PX,
+            MARKER_TICK_LENGTH_PX,
+            LABEL_CLEARANCE_PX,
+            LABEL_RISER_OFFSET_PX,
+            LABEL_TICK_HEIGHT_PX
+          };
+
+          const normalizePointForLabels = (point, index) => {
+            if (point == null) {
+              return { x: index, y: null, isNull: true };
+            }
+            if (typeof point === 'number') {
+              return Number.isFinite(point)
+                ? { x: index, y: point }
+                : { x: index, y: null, isNull: true };
+            }
+            if (Array.isArray(point)) {
+              if (!point.length) {
+                return { x: index, y: null, isNull: true };
+              }
+              const xCandidate = point.length >= 2 ? toFiniteNumber(point[0]) : index;
+              const yCandidate = point.length >= 2 ? toFiniteNumber(point[1]) : toFiniteNumber(point[0]);
+              const normalized = {
+                x: Number.isFinite(xCandidate) ? xCandidate : index,
+                y: Number.isFinite(yCandidate) ? yCandidate : null
+              };
+              if (!Number.isFinite(normalized.y)) {
+                normalized.y = null;
+                normalized.isNull = true;
+              }
+              return normalized;
+            }
+            if (point && typeof point === 'object') {
+              const clone = { ...point };
+              if (!Number.isFinite(clone.x)) {
+                const indexCandidate = toFiniteNumber(clone.index);
+                clone.x = Number.isFinite(indexCandidate) ? indexCandidate : index;
+              }
+              if (!Number.isFinite(clone.y)) {
+                const yCandidate = toFiniteNumber(clone.y);
+                clone.y = Number.isFinite(yCandidate) ? yCandidate : null;
+              }
+              if (clone.y == null) {
+                clone.isNull = true;
+              }
+              return clone;
+            }
+            const numeric = toFiniteNumber(point);
+            return Number.isFinite(numeric)
+              ? { x: index, y: numeric }
+              : { x: index, y: null, isNull: true };
+          };
+
+          const determineLabelOrientation = (value, bounds, options = {}) => {
+            if (!Number.isFinite(value)) return null;
+            const min = Number.isFinite(bounds?.min) ? Number(bounds.min) : null;
+            const max = Number.isFinite(bounds?.max) ? Number(bounds.max) : null;
+            if (min == null || max == null || max <= min) return 'above';
+            const span = max - min;
+            const normalized = Math.min(1, Math.max(0, (value - min) / span));
+            const reversed = !!bounds?.reversed;
+            const distanceToTop = reversed ? normalized : 1 - normalized;
+            const flipThreshold = Number.isFinite(options.flipThreshold) ? options.flipThreshold : 0.08;
+            return distanceToTop <= flipThreshold ? 'below' : 'above';
+          };
+
+          const processDataForLabels = (seriesList, axisBoundsList, options = {}) => {
+            if (!Array.isArray(seriesList) || !seriesList.length) return seriesList;
+            const labelLiftPx = Number.isFinite(options.labelLiftPx)
+              ? Math.abs(options.labelLiftPx)
+              : Math.abs(LABEL_RISER_OFFSET_PX);
+            const resolvedLabelOffset = Number.isFinite(options.labelOffset)
+              ? Math.abs(options.labelOffset)
+              : 10;
+            const flipThreshold = Number.isFinite(options.flipThreshold)
+              ? options.flipThreshold
+              : 0.08;
+            const fallbackTickHeight = Number.isFinite(LABEL_TICK_HEIGHT_PX)
+              ? Math.max(1, Math.round(Math.abs(LABEL_TICK_HEIGHT_PX)))
+              : 8;
+
+            seriesList.forEach((series, seriesIndex) => {
+              if (!series || !Array.isArray(series.data)) return;
+              const originAxis = Number.isFinite(series.__originAxis) ? series.__originAxis : 0;
+              const bounds = axisBoundsList[originAxis] || axisBoundsList[0] || {};
+              const seriesLabelOptions = (series && (series.__bookletLabelOptions
+                || series.userOptions?.__bookletLabelOptions
+                || series.options?.__bookletLabelOptions)) || {};
+              const tickHeightOption = Number.isFinite(seriesLabelOptions.tickHeight)
+                ? seriesLabelOptions.tickHeight
+                : fallbackTickHeight;
+
+              series.data = series.data.map((point, pointIndex) => {
+                const normalizedPoint = normalizePointForLabels(point, pointIndex);
+                const value = Number.isFinite(normalizedPoint.y) ? normalizedPoint.y : null;
+
+                if (value == null) {
+                  const disabledLabels = isPlainObject(normalizedPoint.dataLabels)
+                    ? { ...normalizedPoint.dataLabels, enabled: false }
+                    : { enabled: false };
+                  normalizedPoint.dataLabels = disabledLabels;
+                  if (normalizedPoint.custom) {
+                    normalizedPoint.custom = { ...normalizedPoint.custom, labelOrientation: null };
+                  }
+                  return normalizedPoint;
+                }
+
+                const orientation = determineLabelOrientation(value, bounds, { flipThreshold }) || 'above';
+                const baseLabel = isPlainObject(normalizedPoint.dataLabels)
+                  ? { ...normalizedPoint.dataLabels }
+                  : {};
+
+                const resolvedTickHeight = Number.isFinite(tickHeightOption)
+                  ? Math.max(1, Math.round(Math.abs(tickHeightOption)))
+                  : fallbackTickHeight;
+
+                const baseOffset = orientation === 'below'
+                  ? Math.abs(resolvedLabelOffset)
+                  : -Math.abs(resolvedLabelOffset);
+                if (orientation === 'below') {
+                  baseLabel.verticalAlign = 'top';
+                } else {
+                  baseLabel.verticalAlign = 'bottom';
+                }
+                baseLabel.y = baseOffset;
+                if (baseLabel.align == null) {
+                  baseLabel.align = 'center';
+                }
+                normalizedPoint.dataLabels = baseLabel;
+                const customMeta = normalizedPoint.custom ? { ...normalizedPoint.custom } : {};
+                customMeta.labelOrientation = orientation;
+                customMeta.baseLabelOffset = baseOffset;
+                normalizedPoint.custom = customMeta;
+                return normalizedPoint;
+              });
+            });
+
+            return seriesList;
+          };
+
+          const installDroplines = (chart) => {
+            if (!chart || !chart.renderer) return;
+            const storeKey = '_droplineGraphics';
+            chart[storeKey] = chart[storeKey] || [];
+            chart[storeKey].forEach((graphic) => {
+              if (graphic && typeof graphic.destroy === 'function') {
+                graphic.destroy();
+              }
+            });
+            chart[storeKey] = [];
+            const plotTop = chart.plotTop;
+            const plotLeft = chart.plotLeft;
+            const plotHeight = chart.plotHeight;
+            const bottomY = plotTop + plotHeight;
+            (chart.series || []).forEach((series) => {
+              if (!series.visible) return;
+              (series.points || []).forEach((point) => {
+                if (point.isNull || !Number.isFinite(point.plotX) || !Number.isFinite(point.plotY)) return;
+                const crispX = Math.round(plotLeft + point.plotX) + 0.5;
+                const markerY = plotTop + point.plotY;
+                const dropPath = ['M', crispX, markerY, 'L', crispX, bottomY];
+                const dropLine = chart.renderer
+                  .path(dropPath)
+                  .attr({ stroke: DROPLINE_COLOR, 'stroke-width': 1.1, 'stroke-linecap': 'round', zIndex: 1, 'stroke-dasharray': '2.5 4' })
+                  .add();
+                chart[storeKey].push(dropLine);
+                // Marker-top tick marks disabled to avoid visual clutter around labels.
+              });
+            });
+          };
+
+          const ensureChartDecorators = (() => {
+            let attached = false;
+            return () => {
+              const HighchartsInstance = window.Highcharts;
+              if (!HighchartsInstance || typeof HighchartsInstance.addEvent !== 'function' || attached) return;
+              attached = true;
+              HighchartsInstance.addEvent(HighchartsInstance.Chart, 'render', function onRender() {
+                installDroplines(this);
+              });
+            };
+          })();
+
+          const clamp = (value, min, max) => {
+            if (!Number.isFinite(value)) return value;
+            return Math.max(min, Math.min(max, value));
+          };
+
+          const escapeHtml = (str) => String(str || '').replace(/[&<>"'`]/g, (c) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+            '`': '&#96;'
+          }[c] || c));
+
+          const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+
+          const deepMerge = (target, source) => {
+            const base = Array.isArray(target) ? target.slice() : { ...target };
+            if (!source) return base;
+            if (Array.isArray(source)) {
+              return source.slice();
+            }
+            if (!isPlainObject(source)) {
+              return source;
+            }
+            Object.keys(source).forEach((key) => {
+              const value = source[key];
+              if (Array.isArray(value)) {
+                base[key] = value.slice();
+              } else if (isPlainObject(value)) {
+                base[key] = deepMerge(base[key] || {}, value);
+              } else {
+                base[key] = value;
+              }
+            });
+            return base;
+          };
+
+          const countDecimals = (value) => {
+            if (!Number.isFinite(value)) return 0;
+            const str = String(value).toLowerCase();
+            if (str.includes('e')) {
+              const [base, exponent] = str.split('e');
+              const decimalsPart = (base.split('.')[1] || '').replace(/0+$/, '');
+              const exp = Number(exponent);
+              return Math.max(0, decimalsPart.length - exp);
+            }
+            if (!str.includes('.')) return 0;
+            return str.split('.')[1].replace(/0+$/, '').length;
+          };
+
+          const roundToDecimals = (value, decimals) => {
+            const safeDecimals = Math.max(0, Math.min(decimals, 8));
+            const factor = Math.pow(10, safeDecimals + 2);
+            return Math.round(value * factor) / factor;
+          };
+
+          const niceStep = (rawStep, constraints = {}) => {
+            const allowDecimalTicks = !!constraints.allowDecimalTicks;
+            const minimum = allowDecimalTicks
+              ? Math.max(Number.EPSILON, constraints.minimum || Number.EPSILON)
+              : Math.max(1, constraints.minimum || 1);
+            if (!Number.isFinite(rawStep) || rawStep === 0) return minimum;
+            const absStep = Math.abs(rawStep);
+            const exponent = Math.floor(Math.log10(absStep));
+            const magnitude = Math.pow(10, exponent);
+            const fraction = absStep / magnitude;
+            let niceFraction;
+            if (fraction <= 1) niceFraction = 1;
+            else if (fraction <= 2.4) niceFraction = 2;
+            else if (fraction <= 3.2) niceFraction = 2.5;
+            else if (fraction <= 5) niceFraction = 5;
+            else niceFraction = 10;
+            let step = niceFraction * magnitude;
+            if (constraints.isPercent) {
+              const percentChoices = allowDecimalTicks
+                ? [0.001, 0.002, 0.003, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 3, 5, 10, 20, 25, 50]
+                : [1, 2, 5, 10, 20, 25, 50];
+              const adjusted = percentChoices.find((choice) => choice >= step) || percentChoices[percentChoices.length - 1];
+              step = Math.max(adjusted, minimum);
+            } else {
+              step = Math.max(step, minimum);
+            }
+            if (!allowDecimalTicks && !Number.isInteger(step)) {
+              step = Math.ceil(step);
+            }
+            return rawStep < 0 ? -step : step;
+          };
+
+          const formatNumberForDisplay = (value, decimals, HighchartsInstance, options = {}) => {
+            if (!Number.isFinite(value)) return '';
+            const { isPercent = false, isMoney = false, disableAbbrev = false } = options;
+            const valueDecimals = countDecimals(value);
+            const requestedDecimals = Number.isFinite(decimals) ? Math.max(0, decimals) : 0;
+            const targetPrecision = Math.max(requestedDecimals, valueDecimals);
+            const thresholds = [
+              { limit: 1_000_000_000, divisor: 1_000_000_000, suffix: ' B' },
+              { limit: 1_000_000, divisor: 1_000_000, suffix: ' M' },
+              { limit: 1_000, divisor: 1_000, suffix: ' K' }
+            ];
+            const abs = Math.abs(value);
+            let scaled = value;
+            let suffix = '';
+            let dp = Math.max(0, Math.min(4, targetPrecision));
+
+            const smallMagnitude = abs < 1;
+            if (!smallMagnitude) {
+              if (isPercent) {
+                const percentCap = Math.max(4, requestedDecimals);
+                dp = Math.min(dp, percentCap);
+              } else if (isMoney) {
+                dp = Math.min(dp, Math.max(2, requestedDecimals));
+              } else {
+                dp = Math.min(dp, Math.max(2, requestedDecimals));
+              }
+            } else if (isPercent) {
+              const percentCap = Math.max(4, requestedDecimals);
+              dp = Math.min(dp, percentCap);
+            }
+
+            if (!disableAbbrev && !isPercent && abs >= 1_000) {
+              const threshold = thresholds.find((entry) => abs >= entry.limit);
+              if (threshold) {
+                scaled = value / threshold.divisor;
+                suffix = threshold.suffix;
+                if (!smallMagnitude) {
+                  dp = Math.min(dp, Math.max(2, requestedDecimals));
+                }
+              }
+            }
+
+            let formatted;
+            if (!HighchartsInstance || typeof HighchartsInstance.numberFormat !== 'function') {
+              formatted = dp === 0
+                ? Math.round(scaled).toString()
+                : Number(scaled.toFixed(dp)).toString();
+            } else {
+              formatted = HighchartsInstance.numberFormat(scaled, dp);
+            }
+            if (dp > 0) {
+              formatted = formatted.replace(/(\.\d*?[1-9])0+$/g, '$1');
+              formatted = formatted.replace(/\.0+$/g, '');
+            }
+            return `${formatted}${suffix}`.trim();
+          };
+
+            const buildHtmlLabelFormatter = (options = {}) => {
+              const {
+                prefix = '',
+                suffix = '',
+                decimals,
+                formatContext: requestedFormatContext,
+                tickHeight: tickHeightOption
+              } = options;
+              const baseDecimals = Number.isFinite(decimals) ? decimals : 0;
+              const formatContext = {
+                ...(requestedFormatContext || {}),
+                disableAbbrev: true
+              };
+
+              return function htmlLabelFormatter() {
+                const pointValue = this && this.y;
+                if (!Number.isFinite(pointValue)) {
+                  return '';
+                }
+                const orientation = (this.point && this.point.custom && this.point.custom.labelOrientation) === 'below'
+                  ? 'below'
+                  : 'above';
+                const orientationClass = orientation === 'below' ? 'is-below' : 'is-above';
+                const HighchartsInstance = window.Highcharts || (this.series && this.series.chart && this.series.chart.Highcharts);
+                const dynamicDecimals = Math.max(baseDecimals, Math.min(4, countDecimals(pointValue)));
+                const rendered = formatNumberForDisplay(pointValue, dynamicDecimals, HighchartsInstance, formatContext);
+                const composed = prefix + rendered + suffix;
+                const digitCount = composed ? (composed.match(/[0-9]/g) || []).length : 0;
+                const normalizedLength = composed.replace(/[^0-9a-zA-Z]/g, '').length;
+                const hasLongNumber = digitCount >= 4;
+                const hasExtendedLength = normalizedLength > 5;
+                const isShortNumber = digitCount <= 2;
+                const centimeterPx = Math.round(CM_TO_PX);
+                const threeQuarterCmPx = Math.round(CM_TO_PX * 0.75);
+                const halfCentimeterPx = Math.round(CM_TO_PX * 0.5);
+                const quarterCentimeterPx = Math.round(CM_TO_PX * 0.25);
+                const resolvedTickHeight = Number.isFinite(tickHeightOption)
+                  ? Math.max(6, Math.round(Math.abs(tickHeightOption)))
+                  : 10;
+                let spacingOffset;
+                if (hasExtendedLength) {
+                  const extra = Math.max(0, normalizedLength - 5);
+                  spacingOffset = Math.max(centimeterPx, resolvedTickHeight + 8 + Math.round(extra * 1.6));
+                } else if (hasLongNumber) {
+                  spacingOffset = Math.max(threeQuarterCmPx, resolvedTickHeight + 6);
+                } else if (isShortNumber) {
+                  spacingOffset = Math.max(quarterCentimeterPx, Math.round(resolvedTickHeight * 0.4));
+                } else {
+                  spacingOffset = Math.max(halfCentimeterPx, resolvedTickHeight + 3);
+                }
+                const chartInstance = this.series && this.series.chart;
+                const axisInstance = this.series && this.series.yAxis;
+                const minSpacing = Math.max(2, Math.round(resolvedTickHeight * 0.4));
+                const maxSpacing = hasExtendedLength
+                  ? centimeterPx + 28
+                  : hasLongNumber
+                    ? centimeterPx + 6
+                    : isShortNumber
+                      ? Math.max(quarterCentimeterPx * 1.2, resolvedTickHeight + 5)
+                      : halfCentimeterPx + 8;
+                spacingOffset = clamp(spacingOffset, minSpacing, maxSpacing);
+                if (chartInstance && axisInstance && Number.isFinite(pointValue)) {
+                  const currentX = this.point != null ? this.point.x : undefined;
+                  const currentIndex = Number.isInteger(this?.point?.index) ? this.point.index : null;
+                  const currentYPx = axisInstance.toPixels(pointValue, true);
+                  let minDistancePx = Infinity;
+                  chartInstance.series.forEach((seriesEntry) => {
+                    if (!seriesEntry || seriesEntry === this.series || !seriesEntry.visible) return;
+                    const otherAxis = seriesEntry.yAxis || axisInstance;
+                    let candidatePoint = null;
+                    if (typeof currentX !== 'undefined') {
+                      candidatePoint = seriesEntry.points?.find((pt) => pt && pt.x === currentX && Number.isFinite(pt.y));
+                    }
+                    if (!candidatePoint && currentIndex != null && Array.isArray(seriesEntry.points)) {
+                      const indexedPoint = seriesEntry.points[currentIndex];
+                      if (indexedPoint && Number.isFinite(indexedPoint.y)) {
+                        candidatePoint = indexedPoint;
+                      }
+                    }
+                    if (!candidatePoint || !Number.isFinite(candidatePoint.y) || !otherAxis) return;
+                    const otherYPx = otherAxis.toPixels(candidatePoint.y, true);
+                    const distancePx = Math.abs(otherYPx - currentYPx);
+                    if (Number.isFinite(distancePx)) {
+                      minDistancePx = Math.min(minDistancePx, distancePx);
+                    }
+                  });
+                  if (minDistancePx < 20) {
+                    const separationStep = 4;
+                    const seriesIndex = Number.isFinite(this.series.index) ? this.series.index : 0;
+                    spacingOffset += separationStep * (seriesIndex + 1);
+                    spacingOffset = clamp(spacingOffset, minSpacing, maxSpacing);
+                  }
+                }
+                const safeContent = escapeHtml(composed);
+                const padX = hasExtendedLength ? 6 : hasLongNumber ? 5 : isShortNumber ? 3 : 4;
+                const padY = hasExtendedLength ? 3 : 2;
+                const minWidth = isShortNumber ? 0 : 14;
+                const haloExpand = hasExtendedLength ? 6 : hasLongNumber ? 3 : isShortNumber ? -8 : 0;
+                const haloOuter = hasExtendedLength ? 6 : isShortNumber ? 3 : 4;
+                const baseLetterSpacing = hasExtendedLength || hasLongNumber ? '0.05em' : isShortNumber ? '0.06em' : '0.08em';
+                let tickLength = resolvedTickHeight;
+                if (hasExtendedLength) {
+                  tickLength = Math.max(tickLength, Math.round(halfCentimeterPx + 4));
+                } else if (hasLongNumber) {
+                  tickLength = Math.max(tickLength, Math.round(halfCentimeterPx));
+                } else if (isShortNumber) {
+                  tickLength = Math.max(5, Math.round(tickLength * 0.7));
+                }
+                let tickWidth = Math.round(clamp(resolvedTickHeight * 0.26, 1.6, 3.2) * 10) / 10;
+                const tickColor = 'rgba(15,23,42,0.58)';
+                const labelGap = Math.round(clamp(spacingOffset * 0.55, 4, Math.max(spacingOffset - 8, 24)));
+                const labelMaxWidth = Math.round(clamp(normalizedLength * 16, isShortNumber ? 60 : 90, 260));
+                const wrapperClassTokens = ['highcharts-data-label-custom', orientationClass];
+                if (hasLongNumber) wrapperClassTokens.push('has-long-number');
+                if (hasExtendedLength) wrapperClassTokens.push('has-extended-length');
+                if (isShortNumber) wrapperClassTokens.push('is-short-number');
+                const metaStore = this.point ? (this.point.__bookletLabelMeta || (this.point.__bookletLabelMeta = {})) : null;
+                if (metaStore) {
+                  metaStore.orientation = orientation;
+                  metaStore.labelOffset = spacingOffset;
+                  metaStore.tickLength = tickLength;
+                }
+                const wrapperStyleParts = [
+                  `--label-gap:${labelGap}px`,
+                  `--tick-length:${tickLength}px`,
+                  `--tick-width:${tickWidth}px`,
+                  `--tick-color:${tickColor}`
+                ];
+                const textStyleParts = [
+                  `--label-pad-x:${padX}px`,
+                  `--label-pad-y:${padY}px`,
+                  `--label-min-width:${minWidth}px`,
+                  `--label-letter-spacing:${baseLetterSpacing}`,
+                  `--halo-expand:${haloExpand}px`,
+                  `--halo-outer:${haloOuter}px`,
+                  `--label-max-width:${labelMaxWidth}px`
+                ];
+                const wrapperStyle = wrapperStyleParts.join(';');
+                const textStyle = textStyleParts.join(';');
+                const labelHtml = `<span class="${wrapperClassTokens.join(' ')}"${wrapperStyle ? ` style="${wrapperStyle}"` : ''}><span class="highcharts-data-label-text"${textStyle ? ` style="${textStyle}"` : ''}>${safeContent}</span><span class="highcharts-data-label-tick" aria-hidden="true"></span></span>`;
+                if (metaStore) {
+                  metaStore.labelHTML = labelHtml;
+                }
+                if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+                  console.log('Formatter output:', labelHtml);
+                }
+                return labelHtml;
+              };
+            };
+
+            if (typeof window !== 'undefined') {
+              window.buildBookletHtmlLabelFormatter = buildHtmlLabelFormatter;
+            }
+
+          const deriveAxisStats = (stat) => {
+            if (!stat || !Array.isArray(stat.series) || !stat.series.length) {
+              return [stat];
+            }
+            const limit = Math.min(stat.series.length, 4);
+            const stats = [];
+            for (let i = 0; i < limit; i += 1) {
+              if (i === 0) {
+                stats.push(stat);
+                continue;
+              }
+              const seriesEntry = stat.series[i];
+              if (!seriesEntry) continue;
+              const meta = seriesEntry.meta || {};
+              const axisStat = {
+                ...stat,
+                series: [seriesEntry],
+                min: Number.isFinite(meta.min) ? meta.min : stat.min,
+                max: Number.isFinite(meta.max) ? meta.max : stat.max
+              };
+              stats.push(axisStat);
+            }
+            return stats.length ? stats : [stat];
+          };
+
+          const MANUAL_SCALE_STORAGE_KEY = 'booklet.manualScaleOverrides';
+
+          const supportsManualScaleStorage = (() => {
+            try {
+              if (typeof window === 'undefined' || !window.localStorage) return false;
+              const testKey = '__booklet_scale_test__';
+              window.localStorage.setItem(testKey, '1');
+              window.localStorage.removeItem(testKey);
+              return true;
+            } catch (err) {
+              return false;
+            }
+          })();
+
+          const sanitizeManualOverrideEntry = (entry) => {
+            if (!entry || typeof entry !== 'object') return {};
+            const result = {};
+            Object.keys(entry).forEach((axisKey) => {
+              const axisEntry = entry[axisKey];
+              const min = Number(axisEntry?.min);
+              const max = Number(axisEntry?.max);
+              if (Number.isFinite(min) && Number.isFinite(max) && max > min) {
+                result[axisKey] = { min, max };
+              }
+            });
+            return result;
+          };
+
+          const loadManualScaleStore = () => {
+            if (!supportsManualScaleStorage) return {};
+            try {
+              const raw = window.localStorage.getItem(MANUAL_SCALE_STORAGE_KEY);
+              if (!raw) return {};
+              const parsed = JSON.parse(raw);
+              if (!parsed || typeof parsed !== 'object') return {};
+              const output = {};
+              Object.keys(parsed).forEach((chartKey) => {
+                const sanitized = sanitizeManualOverrideEntry(parsed[chartKey]);
+                if (Object.keys(sanitized).length) {
+                  output[chartKey] = sanitized;
+                }
+              });
+              return output;
+            } catch (err) {
+              return {};
+            }
+          };
+
+          const persistManualScaleStore = (registry) => {
+            if (!supportsManualScaleStorage) return;
+            try {
+              const payload = {};
+              registry.forEach((value, key) => {
+                if (!key) return;
+                const sanitized = sanitizeManualOverrideEntry(value);
+                if (Object.keys(sanitized).length) {
+                  payload[key] = sanitized;
+                }
+              });
+              const keys = Object.keys(payload);
+              if (!keys.length) {
+                window.localStorage.removeItem(MANUAL_SCALE_STORAGE_KEY);
+              } else {
+                window.localStorage.setItem(MANUAL_SCALE_STORAGE_KEY, JSON.stringify(payload));
+              }
+            } catch (err) {
+              /* ignore storage errors */
+            }
+          };
+
+          const initialManualScaleState = loadManualScaleStore();
+          const manualScaleRegistry = new Map();
+          Object.keys(initialManualScaleState).forEach((chartKey) => {
+            manualScaleRegistry.set(chartKey, initialManualScaleState[chartKey]);
+          });
+
+          const updateManualScaleRegistry = (chartKey, overrides) => {
+            if (!chartKey) return {};
+            const sanitized = sanitizeManualOverrideEntry(overrides);
+            if (Object.keys(sanitized).length) {
+              manualScaleRegistry.set(chartKey, sanitized);
+            } else {
+              manualScaleRegistry.delete(chartKey);
+            }
+            persistManualScaleStore(manualScaleRegistry);
+            return sanitized;
+          };
+
+          const fetchManualScaleOverrides = (chartKey) => {
+            if (!chartKey) return {};
+            const stored = manualScaleRegistry.get(chartKey);
+            const sanitized = sanitizeManualOverrideEntry(stored);
+            if (Object.keys(sanitized).length) {
+              if (stored !== sanitized) {
+                manualScaleRegistry.set(chartKey, sanitized);
+                persistManualScaleStore(manualScaleRegistry);
+              }
+              return sanitized;
+            }
+            if (stored) {
+              manualScaleRegistry.delete(chartKey);
+              persistManualScaleStore(manualScaleRegistry);
+            }
+            return {};
+          };
+
+          let scalingModalEl = null;
+          let scalingModalInstance = null;
+          let scalingModalAxesContainer = null;
+          let scalingModalApplyBtn = null;
+          let scalingModalResetBtn = null;
+          let activeScaleContext = null;
+          const SCALE_AXIS_LABELS = ['Primary', 'Secondary', 'Tertiary', 'Quaternary'];
+
+          const alignAxisBoundsToPrimary = (boundsList) => {
+            if (!Array.isArray(boundsList) || !boundsList.length) {
+              return Array.isArray(boundsList) ? boundsList : [];
+            }
+            const primary = boundsList[0];
+            if (!primary) {
+              return boundsList.slice();
+            }
+            const cloneBounds = (bounds) => {
+              if (!bounds) return null;
+              const ticks = Array.isArray(bounds.ticks) ? bounds.ticks.slice() : [];
+              return { ...bounds, ticks };
+            };
+            const primaryClone = cloneBounds(primary);
+            return boundsList.map((bounds, index) => {
+              if (index === 0) {
+                return primaryClone;
+              }
+              const target = cloneBounds(bounds) || primaryClone;
+              if (!primaryClone) {
+                return target;
+              }
+              return {
+                ...target,
+                min: primaryClone.min,
+                max: primaryClone.max,
+                ticks: Array.isArray(primaryClone.ticks) ? primaryClone.ticks.slice() : [],
+                allowDecimals: primaryClone.allowDecimals,
+                decimals: primaryClone.decimals,
+                reversed: primaryClone.reversed
+              };
+            });
+          };
+
+          const ensureSoftWhiteHaloFilter = () => {
+            if (typeof document === 'undefined') return;
+            if (document.getElementById('softWhiteHalo')) return;
+            const svgNS = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(svgNS, 'svg');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.style.position = 'absolute';
+            svg.style.width = '0';
+            svg.style.height = '0';
+            svg.style.overflow = 'hidden';
+            svg.innerHTML = `
+              <filter id="softWhiteHalo" x="-50%" y="-50%" width="50%" height="50%">
+                <feGaussianBlur in="SourceAlpha" stdDeviation="2.0" result="blur"></feGaussianBlur>
+                <feMerge>
+                  <feMergeNode in="blur"></feMergeNode>
+                  <feMergeNode in="SourceGraphic"></feMergeNode>
+                </feMerge>
+              </filter>`;
+            document.body.appendChild(svg);
+          };
+
+          const ensureFallbackScalingStyles = () => {
+            if (typeof document === 'undefined') return;
+            if (document.getElementById('niceScalingModalStyles')) return;
+            const style = document.createElement('style');
+            style.id = 'niceScalingModalStyles';
+            style.textContent = [
+              '.nice-scaling-modal {',
+              '  position: fixed;',
+              '  inset: 0;',
+              '  display: none;',
+              '  align-items: center;',
+              '  justify-content: center;',
+              '  padding: 1.5rem;',
+              '  background: rgba(15, 23, 42, 0.4);',
+              '  backdrop-filter: blur(8px);',
+              '  z-index: 1080;',
+              '  font-family: "Inter", "Segoe UI", system-ui, sans-serif;',
+              '}',
+              '.nice-scaling-modal.show {',
+              '  display: flex;',
+              '}',
+              '.nice-scaling-modal .modal-dialog {',
+              '  margin: 0;',
+              '  width: min(720px, 92vw);',
+              '  pointer-events: auto;',
+              '  display: flex;',
+              '  justify-content: center;',
+              '}',
+              '.nice-scaling-modal .modal-content {',
+              '  border-radius: 18px;',
+              '  pointer-events: auto;',
+              '  width: 100%;',
+              '  max-height: min(85vh, 720px);',
+              '  overflow: hidden;',
+              '  border: 1px solid rgba(148, 163, 184, 0.35);',
+              '  box-shadow: 0 40px 90px -32px rgba(15, 23, 42, 0.55);',
+              '  background: linear-gradient(165deg, #ffffff, #f1f5f9);',
+              '  color: #0f172a;',
+              '  display: flex;',
+              '  flex-direction: column;',
+              '}',
+              '.nice-scaling-modal .modal-header,',
+              '.nice-scaling-modal .modal-footer {',
+              '  background: rgba(248, 250, 252, 0.9);',
+              '  border-color: rgba(148, 163, 184, 0.35);',
+              '  padding: 1.25rem 1.75rem;',
+              '}',
+              '.nice-scaling-modal .modal-header .modal-title {',
+              '  margin: 0;',
+              '  font-size: 1.05rem;',
+              '  letter-spacing: 0.04em;',
+              '  text-transform: uppercase;',
+              '  font-weight: 600;',
+              '}',
+              '.nice-scaling-modal .modal-close {',
+              '  background: transparent;',
+              '  border: none;',
+              '  color: rgba(15, 23, 42, 0.55);',
+              '  font-size: 1.2rem;',
+              '  cursor: pointer;',
+              '  line-height: 1;',
+              '  padding: 0.25rem;',
+              '  border-radius: 999px;',
+              '  transition: color 0.2s ease, background 0.2s ease;',
+              '}',
+              '.nice-scaling-modal .modal-close:hover {',
+              '  color: #1d4ed8;',
+              '  background: rgba(59, 130, 246, 0.1);',
+              '}',
+              '.nice-scaling-modal .modal-body {',
+              '  background: transparent;',
+              '  padding: 1.5rem 1.75rem;',
+              '  overflow-y: auto;',
+              '}',
+              '.nice-scaling-modal .modal-body .modal-subtitle {',
+              '  margin: 0 0 1rem;',
+              '  font-size: 0.82rem;',
+              '  color: rgba(15, 23, 42, 0.65);',
+              '  letter-spacing: 0.03em;',
+              '}',
+              '.nice-scaling-modal [data-role="axis-container"] {',
+              '  display: grid;',
+              '  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));',
+              '  gap: 1.1rem;',
+              '  padding: 0;',
+              '  margin: 0;',
+              '}',
+              '.nice-scaling-axis {',
+              '  list-style: none;',
+              '  margin: 0;',
+              '  padding: 1.1rem 1.15rem;',
+              '  border-radius: 14px;',
+              '  border: 1px solid rgba(203, 213, 225, 0.7);',
+              '  background: #ffffff;',
+              '  box-shadow: 0 18px 36px -28px rgba(15, 23, 42, 0.55);',
+              '  display: flex;',
+              '  flex-direction: column;',
+              '  gap: 0.85rem;',
+              '  color: #0f172a;',
+              '}',
+              '.nice-scaling-axis.has-custom {',
+              '  border-color: rgba(59, 130, 246, 0.55);',
+              '  box-shadow: 0 24px 52px -28px rgba(59, 130, 246, 0.45);',
+              '}',
+              '.nice-scaling-axis-header {',
+              '  display: flex;',
+              '  justify-content: space-between;',
+              '  align-items: flex-start;',
+              '  gap: 1rem;',
+              '}',
+              '.nice-scaling-axis-header .axis-label {',
+              '  font-size: 0.78rem;',
+              '  font-weight: 700;',
+              '  letter-spacing: 0.08em;',
+              '  text-transform: uppercase;',
+              '  color: #0f172a;',
+              '}',
+              '.nice-scaling-axis-header .axis-range {',
+              '  margin-top: 0.25rem;',
+              '  font-size: 0.78rem;',
+              '  color: rgba(15, 23, 42, 0.72);',
+              '}',
+              '.nice-scaling-axis .scale-chip {',
+              '  display: inline-flex;',
+              '  align-items: center;',
+              '  gap: 0.35rem;',
+              '  padding: 0.25rem 0.65rem;',
+              '  border-radius: 999px;',
+              '  background: rgba(96, 165, 250, 0.12);',
+              '  color: #1d4ed8;',
+              '  font-size: 0.68rem;',
+              '  font-weight: 600;',
+              '  letter-spacing: 0.08em;',
+              '  text-transform: uppercase;',
+              '}',
+              '.nice-scaling-axis .scale-chip.is-custom {',
+              '  background: rgba(59, 130, 246, 0.2);',
+              '  color: #1e3a8a;',
+              '}',
+              '.nice-scaling-axis .row {',
+              '  display: grid;',
+              '  grid-template-columns: repeat(2, minmax(0, 1fr));',
+              '  gap: 0.75rem;',
+              '}',
+              '.nice-scaling-axis .form-label {',
+              '  font-size: 0.68rem;',
+              '  text-transform: uppercase;',
+              '  letter-spacing: 0.08em;',
+              '  font-weight: 600;',
+              '  color: rgba(15, 23, 42, 0.7);',
+              '  margin-bottom: 0.35rem;',
+              '}',
+              '.nice-scaling-axis input[type="number"] {',
+              '  width: 100%;',
+              '  border-radius: 10px;',
+              '  border: 1px solid rgba(148, 163, 184, 0.6);',
+              '  padding: 0.45rem 0.65rem;',
+              '  font-size: 0.85rem;',
+              '  font-weight: 500;',
+              '  color: #0f172a;',
+              '  background: rgba(255, 255, 255, 0.95);',
+              '  transition: border-color 0.2s ease, box-shadow 0.2s ease;',
+              '}',
+              '.nice-scaling-axis input[type="number"]:focus {',
+              '  outline: none;',
+              '  border-color: rgba(59, 130, 246, 0.75);',
+              '  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);',
+              '}',
+              '.nice-scaling-axis .axis-meta {',
+              '  font-size: 0.75rem;',
+              '  color: rgba(15, 23, 42, 0.6);',
+              '  display: flex;',
+              '  flex-direction: column;',
+              '  gap: 0.35rem;',
+              '}',
+              '.nice-scaling-axis .axis-meta strong {',
+              '  color: #0f172a;',
+              '  font-weight: 600;',
+              '}',
+              '.nice-scaling-modal .modal-footer {',
+              '  display: flex;',
+              '  flex-wrap: wrap;',
+              '  gap: 0.65rem;',
+              '  justify-content: flex-end;',
+              '  align-items: center;',
+              '}',
+              '.nice-scaling-modal .modal-footer .btn {',
+              '  border-radius: 999px;',
+              '  padding: 0.45rem 1.1rem;',
+              '  border: 1px solid rgba(148, 163, 184, 0.55);',
+              '  background: #ffffff;',
+              '  color: #0f172a;',
+              '  font-size: 0.78rem;',
+              '  font-weight: 600;',
+              '  cursor: pointer;',
+              '  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;',
+              '}',
+              '.nice-scaling-modal .modal-footer .btn-outline {',
+              '  background: transparent;',
+              '}',
+              '.nice-scaling-modal .modal-footer .btn-primary {',
+              '  background: linear-gradient(135deg, #2563eb, #1d4ed8);',
+              '  border-color: transparent;',
+              '  color: #f8fafc;',
+              '}',
+              '.nice-scaling-modal .modal-footer .btn-primary:hover {',
+              '  box-shadow: 0 12px 32px -18px rgba(37, 99, 235, 0.65);',
+              '}',
+              '.nice-scaling-modal .modal-footer .btn:hover {',
+              '  border-color: rgba(37, 99, 235, 0.6);',
+              '  background: rgba(59, 130, 246, 0.08);',
+              '}',
+              '@media (max-width: 640px) {',
+              '  .nice-scaling-modal {',
+              '    padding: 1rem;',
+              '  }',
+              '  .nice-scaling-modal .modal-dialog {',
+              '    width: min(96vw, 520px);',
+              '  }',
+              '  .nice-scaling-modal [data-role="axis-container"] {',
+              '    grid-template-columns: 1fr;',
+              '  }',
+              '}'
+            ].join('\n');
+            document.head.appendChild(style);
+          };
+
+          const ensureScalingModal = () => {
+            if (scalingModalEl) return;
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = `
+              <div class="modal fade nice-scaling-modal" id="scaleModal" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                  <div class="modal-content">
+                    <div class="modal-header">
+                      <h6 class="modal-title">Adjust Chart Scales</h6>
+                      <button type="button" class="modal-close" data-bs-dismiss="modal" aria-label="Close">&#215;</button>
+                    </div>
+                    <div class="modal-body">
+                      <p class="modal-subtitle">Fine-tune any axis. Leave fields empty to keep the automatic scaling.</p>
+                      <div class="nice-scaling-axes" data-role="axis-container"></div>
+                    </div>
+                    <div class="modal-footer">
+                      <button type="button" class="btn btn-outline" data-bs-dismiss="modal">Cancel</button>
+                      <button type="button" class="btn btn-outline" data-role="reset" id="resetScale">Reset to Auto</button>
+                      <button type="button" class="btn btn-primary" data-role="apply" id="applyScale">Apply &amp; Close</button>
+                    </div>
+                  </div>
+                </div>
+              </div>`;
+            scalingModalEl = wrapper.firstElementChild;
+            scalingModalAxesContainer = scalingModalEl.querySelector('[data-role="axis-container"]');
+            scalingModalApplyBtn = scalingModalEl.querySelector('[data-role="apply"]');
+            scalingModalResetBtn = scalingModalEl.querySelector('[data-role="reset"]');
+            document.body.appendChild(scalingModalEl);
+
+            const bootstrapModal = window.bootstrap && window.bootstrap.Modal ? window.bootstrap.Modal : null;
+            if (bootstrapModal) {
+              scalingModalInstance = new bootstrapModal(scalingModalEl);
+              scalingModalEl.addEventListener('hidden.bs.modal', () => {
+                activeScaleContext = null;
+                if (scalingModalAxesContainer) {
+                  scalingModalAxesContainer.innerHTML = '';
+                }
+              });
+            } else {
+              ensureFallbackScalingStyles();
+              scalingModalEl.classList.add('modal', 'nice-scaling-modal');
+              scalingModalInstance = {
+                show() {
+                  if (document.body && scalingModalEl.parentElement !== document.body) {
+                    document.body.appendChild(scalingModalEl);
+                  }
+                  scalingModalEl.style.display = 'flex';
+                  scalingModalEl.classList.add('show');
+                },
+                hide() {
+                  scalingModalEl.style.display = 'none';
+                  scalingModalEl.classList.remove('show');
+                  if (scalingModalEl.parentElement && scalingModalEl.parentElement !== document.body && document.body) {
+                    document.body.appendChild(scalingModalEl);
+                  }
+                  activeScaleContext = null;
+                  if (scalingModalAxesContainer) {
+                    scalingModalAxesContainer.innerHTML = '';
+                  }
+                }
+              };
+            }
+
+            const dismissButtons = scalingModalEl.querySelectorAll('[data-bs-dismiss]');
+            dismissButtons.forEach((btn) => {
+              btn.addEventListener('click', () => {
+                if (scalingModalInstance && !bootstrapModal) {
+                  scalingModalInstance.hide();
+                }
+              });
+            });
+
+            if (scalingModalApplyBtn) {
+              scalingModalApplyBtn.addEventListener('click', () => {
+                if (!activeScaleContext) {
+                  scalingModalInstance.hide();
+                  return;
+                }
+                const overrides = {};
+                const axisNodes = scalingModalAxesContainer ? scalingModalAxesContainer.querySelectorAll('.nice-scaling-axis') : [];
+                axisNodes.forEach((axisNode) => {
+                  const axisIndex = Number(axisNode.getAttribute('data-axis-index'));
+                  const minInput = axisNode.querySelector('input[data-role="min"]');
+                  const maxInput = axisNode.querySelector('input[data-role="max"]');
+                  const minValue = minInput ? minInput.value.trim() : '';
+                  const maxValue = maxInput ? maxInput.value.trim() : '';
+                  if (minValue === '' && maxValue === '') return;
+                  const parsedMin = Number(minValue);
+                  const parsedMax = Number(maxValue);
+                  if (!Number.isFinite(parsedMin) || !Number.isFinite(parsedMax) || parsedMax <= parsedMin) return;
+                  overrides[axisIndex] = { min: parsedMin, max: parsedMax };
+                });
+                const sanitizedOverrides = updateManualScaleRegistry(activeScaleContext.chartKey, overrides);
+                applyManualOverrides(activeScaleContext.chart, sanitizedOverrides, activeScaleContext.context);
+                scalingModalInstance.hide();
+              });
+            }
+
+            if (scalingModalResetBtn) {
+              scalingModalResetBtn.addEventListener('click', () => {
+                if (!activeScaleContext) {
+                  scalingModalInstance.hide();
+                  return;
+                }
+                updateManualScaleRegistry(activeScaleContext.chartKey, null);
+                applyAutoScaling(activeScaleContext.chart, activeScaleContext.context);
+                scalingModalInstance.hide();
+              });
+            }
+          };
+
+          const rebindChartSeries = (chart, context, overrides = null) => {
+            if (!chart || !chart.series || !chart.series.length) return;
+            const seriesList = chart.series;
+            const axisCount = chart.yAxis ? chart.yAxis.length : 1;
+            const contextOrigins = Array.isArray(context?.seriesOrigins) ? context.seriesOrigins : null;
+            const storedOrigins = Array.isArray(chart.__seriesOrigins) ? chart.__seriesOrigins : null;
+            const origins = seriesList.map((_, idx) => {
+              const origin = contextOrigins && Number.isFinite(contextOrigins[idx]) ? contextOrigins[idx]
+                : storedOrigins && Number.isFinite(storedOrigins[idx]) ? storedOrigins[idx]
+                : idx;
+              return Math.max(0, Math.min(origin, axisCount - 1));
+            });
+
+            const effectiveOverrides = overrides != null ? overrides : fetchManualScaleOverrides(context?.chartKey);
+
+            const visibleAxisIndex = (() => {
+              if (!chart.yAxis || !chart.yAxis.length) return 0;
+              const found = chart.yAxis.findIndex((axis) => axis && axis.visible !== false);
+              return found >= 0 ? found : 0;
+            })();
+
+            seriesList.forEach((series, idx) => {
+              const originIdx = origins[idx] ?? 0;
+              let targetAxisIdx = originIdx;
+              if (!Number.isFinite(targetAxisIdx) || targetAxisIdx <= 0) {
+                targetAxisIdx = visibleAxisIndex;
+              }
+              const axisRef = chart.yAxis && chart.yAxis[targetAxisIdx];
+              const hasOverrideForAxis = effectiveOverrides && Object.prototype.hasOwnProperty.call(effectiveOverrides, targetAxisIdx);
+              if (!axisRef || (axisRef.visible === false && !hasOverrideForAxis)) {
+                targetAxisIdx = visibleAxisIndex;
+              }
+              const currentAxisIdx = series && series.yAxis ? series.yAxis.index : 0;
+              if (currentAxisIdx !== targetAxisIdx) {
+                series.update({ yAxis: targetAxisIdx }, false);
+                series.redraw();
+              }
+            });
+          };
+
+          const applyAutoScaling = (chart, context) => {
+            if (!chart || !context) return;
+            const yAxes = chart.yAxis || [];
+            if (!yAxes.length) return;
+            const allowMultipleAxes = !!(context.axisOptions && context.axisOptions.allowMultipleAxes);
+            const axisStats = allowMultipleAxes ? deriveAxisStats(context.stat).slice(0, 4) : [context.stat];
+            const rawAutoBounds = axisStats.map((axisStat) => computeAxisBounds(axisStat, context.axisOptions || {}));
+            const autoBoundsList = alignAxisBoundsToPrimary(rawAutoBounds);
+            context.axisStats = axisStats;
+            context.autoBounds = autoBoundsList;
+            yAxes.forEach((axis, index) => {
+              const bounds = autoBoundsList[index] || autoBoundsList[0];
+              if (!bounds) return;
+              const isPrimary = index === 0;
+              const axisOptions = axis && axis.options ? axis.options : {};
+              const baseLabels = axisOptions.labels || {};
+              const resolvedLineWidth = isPrimary
+                ? (Number.isFinite(axisOptions.lineWidth) ? Math.max(1, axisOptions.lineWidth) : 2)
+                : 0;
+              const resolvedGridWidth = isPrimary
+                ? (Number.isFinite(axisOptions.gridLineWidth) ? Math.max(0, axisOptions.gridLineWidth) : 1)
+                : 0;
+              axis.update({
+                min: bounds.min,
+                max: bounds.max,
+                tickPositions: bounds.ticks,
+                startOnTick: true,
+                endOnTick: true,
+                allowDecimals: bounds.allowDecimals !== false,
+                visible: isPrimary,
+                opposite: !isPrimary && index % 2 === 1,
+                labels: {
+                  ...baseLabels,
+                  align: baseLabels.align != null ? baseLabels.align : (isPrimary ? 'right' : 'left'),
+                  enabled: isPrimary
+                },
+                gridLineWidth: resolvedGridWidth,
+                lineWidth: resolvedLineWidth,
+                reversed: !!bounds.reversed
+              }, false);
+            });
+            if (yAxes.length > axisStats.length) {
+              for (let i = axisStats.length; i < yAxes.length; i += 1) {
+                const extraAxis = yAxes[i];
+                if (!extraAxis) continue;
+                extraAxis.update({
+                  visible: false,
+                  opposite: false,
+                  labels: { enabled: false },
+                  tickPositions: null,
+                  min: null,
+                  max: null,
+                  allowDecimals: true,
+                  gridLineWidth: 0,
+                  lineWidth: 0,
+                  reversed: false
+                }, false);
+              }
+            }
+            const primaryAxis = yAxes[0];
+            if (primaryAxis) {
+              const primaryOptions = primaryAxis.options || {};
+              primaryAxis.update({
+                visible: true,
+                opposite: false,
+                labels: {
+                  ...(primaryOptions.labels || {}),
+                  enabled: true,
+                  align: (primaryOptions.labels && primaryOptions.labels.align) || 'right'
+                },
+                lineWidth: Number.isFinite(primaryOptions.lineWidth) ? Math.max(1, primaryOptions.lineWidth) : 2,
+                gridLineWidth: Number.isFinite(primaryOptions.gridLineWidth) ? Math.max(0, primaryOptions.gridLineWidth) : 1
+              }, false);
+            }
+            rebindChartSeries(chart, context);
+            chart.redraw();
+          };
+
+          const applyManualOverrides = (chart, overrides, context) => {
+            if (!chart || !context) return;
+            const yAxes = chart.yAxis || [];
+            if (!yAxes.length) return;
+            const effectiveOverrides = overrides != null ? overrides : fetchManualScaleOverrides(context.chartKey);
+            const allowMultipleAxes = !!(context.axisOptions && context.axisOptions.allowMultipleAxes);
+            const axisStats = context.axisStats || (allowMultipleAxes ? deriveAxisStats(context.stat).slice(0, 4) : [context.stat]);
+            const storedAutoBounds = Array.isArray(context.autoBounds) ? context.autoBounds : [];
+            const autoBoundsList = storedAutoBounds.length ? alignAxisBoundsToPrimary(storedAutoBounds) : [];
+            const desiredTickCountFallback = Math.max(5, Math.min((context.axisOptions && context.axisOptions.desiredTickCount) || 6, 10));
+            yAxes.forEach((axis, index) => {
+              const axisStat = axisStats[index] || axisStats[0] || context.stat;
+              const axisOptions = axis && axis.options ? axis.options : {};
+              const baseLabels = axisOptions.labels || {};
+              const defaultOpposite = typeof axisOptions.opposite === 'boolean'
+                ? axisOptions.opposite
+                : (index > 0 && index % 2 === 1);
+              const resolvedLineWidth = index === 0
+                ? (Number.isFinite(axisOptions.lineWidth) ? Math.max(1, axisOptions.lineWidth) : 2)
+                : 0;
+              const resolvedGridWidth = index === 0
+                ? (Number.isFinite(axisOptions.gridLineWidth) ? Math.max(0, axisOptions.gridLineWidth) : 1)
+                : 0;
+              const labelAlign = baseLabels.align != null ? baseLabels.align : (index === 0 ? 'right' : 'left');
+              const labelOptions = {
+                ...baseLabels,
+                align: labelAlign,
+                enabled: index === 0
+              };
+              const override = effectiveOverrides[index];
+              if (override && Number.isFinite(override.min) && Number.isFinite(override.max) && override.max > override.min) {
+                  const span = override.max - override.min;
+                  const desiredTickBase = Number.isFinite(axisOptions.desiredTickCount)
+                    ? Number(axisOptions.desiredTickCount)
+                    : desiredTickCountFallback;
+                  const desiredSegments = Math.max(1, Math.round(desiredTickBase) - 1);
+                  const minInterval = Number.isFinite(axisOptions.minimumTickInterval) && axisOptions.minimumTickInterval > 0
+                    ? axisOptions.minimumTickInterval
+                    : Number.EPSILON;
+                  const manualStep = niceStep(span / Math.max(desiredSegments, 1), {
+                    allowDecimalTicks: true,
+                    minimum: minInterval,
+                    isPercent: !!axisStat?.isPercent
+                  });
+                  let manualSegments = Number.isFinite(manualStep) && manualStep > 0
+                    ? Math.round(span / manualStep)
+                    : desiredSegments;
+                  manualSegments = Math.max(4, Math.min(16, manualSegments || desiredSegments || 4));
+                  const manualBounds = computeAxisBounds(axisStat, {
+                    ...(context.axisOptions || {}),
+                    min: override.min,
+                    max: override.max,
+                    padFraction: 0,
+                    manualDivisions: manualSegments
+                  });
+                  const ticks = manualBounds && Array.isArray(manualBounds.ticks) && manualBounds.ticks.length
+                    ? manualBounds.ticks
+                    : [override.min, override.max];
+                  const minValue = manualBounds && Number.isFinite(manualBounds.min) ? manualBounds.min : override.min;
+                  const maxValue = manualBounds && Number.isFinite(manualBounds.max) ? manualBounds.max : override.max;
+                  axis.update({
+                    min: minValue,
+                    max: maxValue,
+                    tickPositions: ticks,
+                    startOnTick: true,
+                    endOnTick: true,
+                    allowDecimals: manualBounds ? manualBounds.allowDecimals !== false : undefined,
+                    visible: index === 0,
+                    opposite: defaultOpposite,
+                    labels: labelOptions,
+                    gridLineWidth: resolvedGridWidth,
+                    lineWidth: resolvedLineWidth,
+                    reversed: !!manualBounds.reversed
+                  }, false);
+                  return;
+              }
+
+              if (index === 0) {
+                const auto = autoBoundsList[0]
+                  ? autoBoundsList[0]
+                  : computeAxisBounds(axisStat, context.axisOptions || {});
+                axis.update({
+                  min: auto.min,
+                  max: auto.max,
+                  tickPositions: auto.ticks,
+                  startOnTick: true,
+                  endOnTick: true,
+                  allowDecimals: auto.allowDecimals !== false,
+                  visible: true,
+                  labels: {
+                    ...labelOptions,
+                    enabled: true
+                  },
+                  gridLineWidth: resolvedGridWidth,
+                  lineWidth: resolvedLineWidth,
+                  reversed: !!auto.reversed
+                }, false);
+                const refreshedAutoBounds = autoBoundsList.length ? autoBoundsList : [auto];
+                context.autoBounds = alignAxisBoundsToPrimary(refreshedAutoBounds);
+              } else {
+                const fallbackSource = autoBoundsList[index]
+                  || autoBoundsList[0]
+                  || computeAxisBounds(axisStat, context.axisOptions || {});
+                const fallback = alignAxisBoundsToPrimary([autoBoundsList[0] || fallbackSource])[0] || fallbackSource;
+                axis.update({
+                  min: fallback.min,
+                  max: fallback.max,
+                  tickPositions: fallback.ticks,
+                  startOnTick: true,
+                  endOnTick: true,
+                  allowDecimals: fallback.allowDecimals !== false,
+                  visible: index === 0,
+                  opposite: defaultOpposite,
+                  labels: labelOptions,
+                  gridLineWidth: 0,
+                  lineWidth: 0,
+                  reversed: !!fallback.reversed
+                }, false);
+              }
+            });
+            const primaryAxis = yAxes[0];
+            if (primaryAxis) {
+              const primaryOptions = primaryAxis.options || {};
+              primaryAxis.update({
+                visible: true,
+                opposite: false,
+                labels: {
+                  ...(primaryOptions.labels || {}),
+                  enabled: true,
+                  align: (primaryOptions.labels && primaryOptions.labels.align) || 'right'
+                },
+                lineWidth: Number.isFinite(primaryOptions.lineWidth) ? Math.max(1, primaryOptions.lineWidth) : 2,
+                gridLineWidth: Number.isFinite(primaryOptions.gridLineWidth) ? Math.max(0, primaryOptions.gridLineWidth) : 1
+              }, false);
+            }
+            rebindChartSeries(chart, context, effectiveOverrides);
+            chart.redraw();
+          };
+
+          const openScalingModal = (chart, context) => {
+            ensureScalingModal();
+            if (!scalingModalEl || !scalingModalInstance || !scalingModalAxesContainer) return;
+            activeScaleContext = {
+              chart,
+              context,
+              chartKey: context.chartKey
+            };
+            const usingBootstrap = !!(window.bootstrap && window.bootstrap.Modal);
+            if (usingBootstrap) {
+              if (scalingModalEl.parentElement !== document.body) {
+                document.body.appendChild(scalingModalEl);
+                scalingModalEl.removeAttribute('data-embedded');
+              }
+            } else if (document.body && scalingModalEl.parentElement !== document.body) {
+              document.body.appendChild(scalingModalEl);
+              scalingModalEl.removeAttribute('data-embedded');
+            }
+            scalingModalAxesContainer.innerHTML = '';
+            const overrides = fetchManualScaleOverrides(context.chartKey);
+            const yAxes = chart.yAxis || [];
+            const seriesList = (context && context.stat && Array.isArray(context.stat.series)) ? context.stat.series : [];
+            yAxes.slice(0, 4).forEach((axis, index) => {
+              const seriesName = seriesList[index] && seriesList[index].name ? seriesList[index].name : null;
+              const axisLabel = seriesName || SCALE_AXIS_LABELS[index] || `Axis ${index + 1}`;
+              const axisNode = document.createElement('div');
+              axisNode.className = 'nice-scaling-axis mb-3 p-3 text-light';
+              axisNode.setAttribute('data-axis-index', index);
+              const extremes = axis && typeof axis.getExtremes === 'function' ? axis.getExtremes() : { min: axis.min, max: axis.max };
+              const currentMin = Number.isFinite(extremes.min) ? extremes.min : 0;
+              const currentMax = Number.isFinite(extremes.max) ? extremes.max : 0;
+              const contextStat = context && context.stat ? context.stat : {};
+              const formatContext = { isPercent: !!contextStat.isPercent, isMoney: !!contextStat.isMoney };
+              const currentLabel = `${formatNumberForDisplay(currentMin, 0, window.Highcharts, formatContext)} – ${formatNumberForDisplay(currentMax, 0, window.Highcharts, formatContext)}`;
+              axisNode.innerHTML = `
+                <div class="nice-scaling-axis-header d-flex justify-content-between align-items-start mb-3">
+                  <div>
+                    <div class="axis-label text-uppercase fw-semibold small">${axisLabel}</div>
+                    <div class="axis-range mt-1">Current range: ${currentLabel}</div>
+                  </div>
+                  <div class="badge bg-primary bg-opacity-25 text-light border border-primary border-opacity-30">${index === 0 ? 'Primary' : 'Linked'}</div>
+                </div>
+                <div class="row g-3">
+                  <div class="col-6">
+                    <label class="form-label form-label-sm text-uppercase text-light text-opacity-75">Minimum</label>
+                    <input type="number" step="any" class="form-control form-control-sm" data-role="min" value="${Number.isFinite(currentMin) ? currentMin.toFixed(3) : ''}" placeholder="Auto" />
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label form-label-sm text-uppercase text-light text-opacity-75">Maximum</label>
+                    <input type="number" step="any" class="form-control form-control-sm" data-role="max" value="${Number.isFinite(currentMax) ? currentMax.toFixed(3) : ''}" placeholder="Auto" />
+                  </div>
+                </div>`;
+              const override = overrides[index];
+              if (override) {
+                const minInput = axisNode.querySelector('input[data-role="min"]');
+                const maxInput = axisNode.querySelector('input[data-role="max"]');
+                if (minInput) minInput.value = override.min;
+                if (maxInput) maxInput.value = override.max;
+              }
+              scalingModalAxesContainer.appendChild(axisNode);
+            });
+            scalingModalInstance.show();
+          };
+
+          const ensurePrintHidingStyles = () => {
+            if (document.getElementById('graph-print-hide-scale')) return;
+            const style = document.createElement('style');
+            style.id = 'graph-print-hide-scale';
+            style.textContent = `@media print { .nice-scaling-overlay, .chart-scale-btn, .scale-btn { display: none !important; } }`;
+            document.head.appendChild(style);
+          };
+
+          const ensureContainerOverlay = (container) => {
+            if (!container) return null;
+            const computed = window.getComputedStyle ? window.getComputedStyle(container) : null;
+            if (computed && computed.position === 'static') {
+              container.style.position = 'relative';
+            }
+            ensurePrintHidingStyles();
+            let overlay = container.querySelector('.nice-scaling-overlay');
+            if (!overlay) {
+              overlay = document.createElement('div');
+              overlay.className = 'nice-scaling-overlay';
+              overlay.style.position = 'absolute';
+              overlay.style.top = '6px';
+              overlay.style.right = '6px';
+              overlay.style.zIndex = '30';
+              overlay.style.display = 'flex';
+              overlay.style.gap = '6px';
+              container.appendChild(overlay);
+            }
+            return overlay;
+          };
+
+          const attachScalingControls = (chart, context) => {
+            if (!chart || !context || !context.container) return;
+            const overlay = ensureContainerOverlay(context.container);
+            if (!overlay) return;
+            let button = overlay.querySelector('button[data-role="nice-scale"]');
+            if (!button) {
+              button = document.createElement('button');
+              button.type = 'button';
+              button.className = 'btn btn-dark btn-sm chart-scale-btn';
+              button.setAttribute('data-role', 'nice-scale');
+              button.innerHTML = '<span aria-hidden="true">⚙️</span> Scale';
+              overlay.appendChild(button);
+            }
+            button.style.opacity = '0.85';
+            button.style.borderRadius = '6px';
+            button.style.padding = '2px 8px';
+            button.style.fontSize = '11px';
+            button.style.transition = 'all .2s ease';
+            button.style.border = '1px solid rgba(255,255,255,0.25)';
+            button.onmouseenter = () => { button.style.opacity = '1'; };
+            button.onmouseleave = () => { button.style.opacity = '0.85'; };
+            button.onclick = () => openScalingModal(chart, context);
+          };
+
+          const computeAxisBounds = window.computeAxisBounds || ((stat) => ({
+            min: 0,
+            max: 1,
+            ticks: [0, 0.5, 1],
+            decimals: 0,
+            reversed: !!stat?.upsideDown
+          }));
+
+          function buildTrendSeries(stat, config = {}) {
+            const prefix = config.prefix ?? (stat.isMoney ? '$' : '');
+            const suffix = config.suffix ?? (stat.isPercent ? '%' : '');
+            const decimals = Number.isFinite(config.decimals) ? config.decimals : 0;
+            const lineWidth = config.lineWidth ?? 3.6;
+            const zoneColors = {
+              up: (config.zoneColors && config.zoneColors.up) || TREND_UP,
+              down: (config.zoneColors && config.zoneColors.down) || TREND_DOWN
+            };
+            const formatContext = { isPercent: !!stat.isPercent, isMoney: !!stat.isMoney };
+
+            const markerDefaults = {
+              enabled: false,
+              radius: 0,
+              symbol: 'circle',
+              lineWidth: 0,
+              fillColor: 'transparent',
+              lineColor: 'transparent',
+              states: {
+                hover: { enabled: false }
+              }
+            };
+            const marker = deepMerge(markerDefaults, config.marker || {});
+
+            const labelLiftPx = Number.isFinite(config.labelLiftPx)
+              ? Math.abs(config.labelLiftPx)
+              : Math.abs(LABEL_RISER_OFFSET_PX);
+            const dataLabelDefaults = {
+              enabled: false,
+              useHTML: true,
+              color: '#0f172a',
+              backgroundColor: 'transparent',
+              borderRadius: 0,
+              borderWidth: 0,
+              padding: 0,
+              style: {
+                fontWeight: '700',
+                fontSize: '11px',
+                textOutline: 'none',
+                whiteSpace: 'nowrap'
+              },
+              align: 'center',
+              verticalAlign: 'top',
+              y: -10,
+              allowOverlap: false,
+              overflow: 'allow',
+              crop: false
+            };
+            const dataLabels = deepMerge(dataLabelDefaults, config.dataLabels || {});
+            const dataLabelsEnabled = dataLabels.enabled !== false;
+
+            const Highcharts = window.Highcharts;
+            const categories = Array.isArray(stat?.dates) ? stat.dates : [];
+
+            const extractNumericValue = (entry) => {
+              if (entry == null) return null;
+              if (Array.isArray(entry)) {
+                if (entry.length >= 2) return toFiniteNumber(entry[1]);
+                if (entry.length === 1) return toFiniteNumber(entry[0]);
+                return null;
+              }
+              if (entry && typeof entry === 'object') {
+                if (Object.prototype.hasOwnProperty.call(entry, 'y')) return toFiniteNumber(entry.y);
+                if (Object.prototype.hasOwnProperty.call(entry, 'value')) return toFiniteNumber(entry.value);
+                if (Object.prototype.hasOwnProperty.call(entry, 'data')) return extractNumericValue(entry.data);
+              }
+              return toFiniteNumber(entry);
+            };
+
+            const buildCleanPoint = (entry, idx, numeric) => {
+              const categoryLabel = idx < categories.length ? categories[idx] : null;
+
+              if (!Number.isFinite(numeric)) {
+                if (Array.isArray(entry)) {
+                  if (!entry.length) {
+                    const basePoint = { x: idx, y: null, isNull: true };
+                    if (categoryLabel != null) basePoint.name = categoryLabel;
+                    return basePoint;
+                  }
+                  const xCandidate = entry[0];
+                  if (Number.isFinite(xCandidate)) {
+                    return [xCandidate, null];
+                  }
+                  if (typeof xCandidate === 'string' && xCandidate.trim().length) {
+                    return { x: idx, name: xCandidate, y: null, isNull: true };
+                  }
+                  const basePoint = { x: idx, y: null, isNull: true };
+                  if (categoryLabel != null) basePoint.name = categoryLabel;
+                  return basePoint;
+                }
+
+                if (entry && typeof entry === 'object') {
+                  const point = { ...entry };
+                  if (!Number.isFinite(point.x)) {
+                    const indexCandidate = toFiniteNumber(point.index);
+                    point.x = Number.isFinite(indexCandidate) ? indexCandidate : idx;
+                  }
+                  point.y = null;
+                  point.isNull = true;
+                  if (point.name == null && categoryLabel != null) {
+                    point.name = categoryLabel;
+                  }
+                  return point;
+                }
+
+                const basePoint = { x: idx, y: null, isNull: true };
+                if (categoryLabel != null) basePoint.name = categoryLabel;
+                return basePoint;
+              }
+
+              if (Array.isArray(entry)) {
+                if (!entry.length) return [idx, numeric];
+                const xCandidate = entry[0];
+                if (Number.isFinite(xCandidate)) {
+                  return [xCandidate, numeric];
+                }
+                if (typeof xCandidate === 'string' && xCandidate.trim().length) {
+                  return { x: idx, name: xCandidate, y: numeric };
+                }
+                return [idx, numeric];
+              }
+
+              if (entry && typeof entry === 'object') {
+                const point = { ...entry };
+                if (!Number.isFinite(point.x)) {
+                  const indexCandidate = toFiniteNumber(point.index);
+                  point.x = Number.isFinite(indexCandidate) ? indexCandidate : idx;
+                }
+                point.y = numeric;
+                if (point.name == null && categoryLabel != null) {
+                  point.name = categoryLabel;
+                }
+                return point;
+              }
+
+              if (categoryLabel != null) {
+                return { x: idx, name: categoryLabel, y: numeric };
+              }
+
+              return [idx, numeric];
+            };
+
+            return (stat.series || []).map((series, seriesIndex, allSeries) => {
+              const rawData = Array.isArray(series.data) ? series.data.slice() : [];
+              const sanitizedValues = rawData.map((value) => extractNumericValue(value));
+
+              const segments = [];
+              let previousValue = null;
+              for (let i = 0; i < sanitizedValues.length; i += 1) {
+                const current = sanitizedValues[i];
+                if (!Number.isFinite(current)) continue;
+                if (Number.isFinite(previousValue)) {
+                  const color = current >= previousValue ? zoneColors.up : zoneColors.down;
+                  segments.push({ index: i, color });
+                }
+                previousValue = current;
+              }
+              const defaultColor = segments.length ? segments[segments.length - 1].color : zoneColors.up;
+              const dashStyles = ['Solid', 'ShortDash', 'ShortDot', 'ShortDashDot'];
+              const dashStyle = dashStyles[Math.min(seriesIndex, dashStyles.length - 1)] || 'Solid';
+              const zones = [];
+              if (segments.length > 1) {
+                for (let i = 0; i < segments.length - 1; i += 1) {
+                  zones.push({ value: segments[i].index, color: segments[i].color });
+                }
+              } else if (segments.length === 1) {
+                zones.push({ value: segments[0].index, color: segments[0].color });
+              }
+
+              const sharedTickHeight = Number.isFinite(LABEL_TICK_HEIGHT_PX)
+                ? Math.max(1, Math.round(Math.abs(LABEL_TICK_HEIGHT_PX)))
+                : Math.max(6, Math.round(MARKER_TICK_LENGTH_PX * 0.5));
+              const desiredTickHeight = Number.isFinite(config.tickHeight)
+                ? Math.abs(config.tickHeight)
+                : sharedTickHeight;
+
+              const cleanSeries = rawData
+                .map((entry, idx) => buildCleanPoint(entry, idx, sanitizedValues[idx]))
+                .filter(Boolean);
+
+              const seriesConfig = {
+                ...series,
+                data: cleanSeries,
+                color: defaultColor,
+                lineColor: defaultColor,
+                lineWidth,
+                zoneAxis: 'x',
+                zones,
+                dashStyle,
+                connectNulls: false,
+                marker
+              };
+
+              if (dataLabelsEnabled) {
+                const baseLabelOptions = (dataLabels && typeof dataLabels === 'object' && !Array.isArray(dataLabels))
+                  ? dataLabels
+                  : {};
+                const sanitizedLabels = {
+                  ...baseLabelOptions,
+                  style: {
+                    ...(baseLabelOptions.style || {})
+                  }
+                };
+//             if (chartMode !== 'staff') {
+//     delete sanitizedLabels.formatter;
+//     delete sanitizedLabels.useHTML;
+//     delete sanitizedLabels.allowOverlap;
+//     delete sanitizedLabels.crop;
+//     delete sanitizedLabels.overflow;
+//     delete sanitizedLabels.padding;
+//     delete sanitizedLabels.zIndex;
+// }
+
+                if (sanitizedLabels.align == null) {
+                  sanitizedLabels.align = 'center';
+                }
+                if (sanitizedLabels.verticalAlign == null) {
+                  sanitizedLabels.verticalAlign = 'top';
+                }
+                if (!Number.isFinite(sanitizedLabels.y)) {
+                  sanitizedLabels.y = -10;
+                }
+                seriesConfig.dataLabels = {
+                  ...sanitizedLabels,
+                  enabled: true
+                };
+              } else {
+                seriesConfig.dataLabels = { enabled: false };
+              }
+
+                seriesConfig.__bookletLabelOptions = {
+                  prefix,
+                  suffix,
+                  decimals,
+                  tickHeight: desiredTickHeight,
+                  formatContext
+                };
+
+              return seriesConfig;
+            });
+          }
+
+          function renderLineChart(config) {
+            const {
+              container,
+              stat,
+              height = 520,
+              categories = [],
+              numberFormat = {},
+              chart = {},
+              xAxis = {},
+              yAxis = {},
+              dataLabels = {},
+              marker = {},
+              lineWidth,
+              zoneColors,
+              tooltip = {},
+              plotOptions = {},
+              axis = {}
+            } = config || {};
+
+            if (!container || !window.Highcharts) return null;
+
+            const showDataLabels = config && config.showDataLabels === true;
+
+            let dataPrecision = 0;
+            let maxAbsValue = 0;
+            let minAbsValue = Number.POSITIVE_INFINITY;
+            if (stat && Array.isArray(stat.series)) {
+              stat.series.forEach((series) => {
+                (series.data || []).forEach((value) => {
+                  if (!Number.isFinite(value)) return;
+                  dataPrecision = Math.max(dataPrecision, countDecimals(value));
+                  const absVal = Math.abs(value);
+                  maxAbsValue = Math.max(maxAbsValue, absVal);
+                  if (absVal > 0) {
+                    minAbsValue = Math.min(minAbsValue, absVal);
+                  }
+                });
+              });
+            }
+            if (!Number.isFinite(minAbsValue)) {
+              minAbsValue = 0;
+            }
+            if (Number.isFinite(stat?.min)) {
+              maxAbsValue = Math.max(maxAbsValue, Math.abs(Number(stat.min)));
+            }
+            if (Number.isFinite(stat?.max)) {
+              maxAbsValue = Math.max(maxAbsValue, Math.abs(Number(stat.max)));
+            }
+
+            const axisOptions = { ...axis };
+            const desiredTickCountOption = Number(axisOptions.desiredTickCount);
+            const desiredTickCountEstimate = Number.isFinite(desiredTickCountOption)
+              ? desiredTickCountOption
+              : (Number(axisOptions.desiredTickCount) || 6);
+            if (!Number.isFinite(axisOptions.desiredTickCount)) {
+              axisOptions.desiredTickCount = desiredTickCountEstimate;
+            }
+            if (!Number.isFinite(axisOptions.minimumTickInterval)) {
+              const explicitMinValue = Number.isFinite(stat?.min) ? Number(stat.min) : null;
+              const explicitMaxValue = Number.isFinite(stat?.max) ? Number(stat.max) : null;
+              let inferredPrecision = dataPrecision;
+              if (explicitMinValue != null && explicitMaxValue != null && explicitMaxValue > explicitMinValue) {
+                const explicitSpan = explicitMaxValue - explicitMinValue;
+                const segmentCount = Math.max(1, (Number.isFinite(axisOptions.desiredTickCount) ? Number(axisOptions.desiredTickCount) : desiredTickCountEstimate) - 1);
+                if (segmentCount > 0) {
+                  const segmentSize = explicitSpan / segmentCount;
+                  if (Number.isFinite(segmentSize)) {
+                    inferredPrecision = Math.max(inferredPrecision, countDecimals(segmentSize));
+                  }
+                }
+              }
+              const precisionCap = stat && stat.isPercent ? 3 : 4;
+              const boundedPrecision = Math.min(precisionCap, Math.max(inferredPrecision, 0));
+              if (boundedPrecision > 0) {
+                axisOptions.minimumTickInterval = Math.pow(10, -boundedPrecision);
+              } else {
+                axisOptions.minimumTickInterval = stat && stat.isPercent ? 1 : 1;
+              }
+            }
+
+            const chartKey = String(config.chartKey || container.dataset.scaleKey || `chart-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
+            container.dataset.scaleKey = chartKey;
+
+            const prefix = numberFormat.prefix ?? (stat && stat.isMoney ? '$' : '');
+            const suffix = numberFormat.suffix ?? (stat && stat.isPercent ? '%' : '');
+            const formatContext = { isPercent: !!(stat && stat.isPercent), isMoney: !!(stat && stat.isMoney) };
+            const allowMultipleAxes = axisOptions.allowMultipleAxes === true;
+            const axisStats = allowMultipleAxes ? deriveAxisStats(stat).slice(0, 4) : [stat];
+            const rawAxisBoundsList = axisStats.map((axisStat) => computeAxisBounds(axisStat, axisOptions));
+            const axisBoundsList = alignAxisBoundsToPrimary(rawAxisBoundsList);
+            const primaryBounds = axisBoundsList[0] || { min: 0, max: 1, ticks: [0, 1], reversed: !!(stat && stat.upsideDown) };
+            const axisCount = allowMultipleAxes ? (axisBoundsList.length || 1) : 1;
+            const axisMagnitude = Math.max(
+              Math.abs(primaryBounds.min ?? 0),
+              Math.abs(primaryBounds.max ?? 0),
+              maxAbsValue
+            );
+            let baseDecimals;
+            if (stat && stat.isPercent) {
+              baseDecimals = axisMagnitude < 1 ? Math.min(Math.max(dataPrecision, 1), 2) : 0;
+            } else if (stat && stat.isMoney) {
+              baseDecimals = axisMagnitude < 1 ? Math.min(dataPrecision, 2) : Math.min(Math.max(dataPrecision, 1), 1);
+            } else if (axisMagnitude >= 1) {
+              baseDecimals = Math.min(Math.max(dataPrecision, 1), 1);
+            } else {
+              baseDecimals = Math.min(Math.max(dataPrecision, 0), 4);
+            }
+            const primaryDisplayDecimals = Number.isFinite(primaryBounds.displayDecimals) ? primaryBounds.displayDecimals : (primaryBounds.decimals || 0);
+            let decimals = Math.max(baseDecimals, primaryDisplayDecimals);
+            if (stat && stat.isPercent) {
+              decimals = Math.min(decimals, 1);
+            } else if (axisMagnitude >= 1) {
+              decimals = Math.min(decimals, axisMagnitude < 10 ? 2 : (stat && stat.isMoney ? 1 : 1));
+            }
+            const baseZoneColors = {
+              up: zoneColors && zoneColors.up ? zoneColors.up : TREND_UP,
+              down: zoneColors && zoneColors.down ? zoneColors.down : TREND_DOWN
+            };
+            const effectiveZoneColors = primaryBounds.reversed
+              ? {
+                  up: zoneColors && zoneColors.down ? zoneColors.down : TREND_DOWN,
+                  down: zoneColors && zoneColors.up ? zoneColors.up : TREND_UP
+                }
+              : baseZoneColors;
+
+            const labelLiftPx = Math.abs(LABEL_RISER_OFFSET_PX);
+            const desiredTickHeight = Number.isFinite(LABEL_TICK_HEIGHT_PX)
+              ? Math.max(1, Math.round(Math.abs(LABEL_TICK_HEIGHT_PX)))
+              : Math.max(6, Math.round(MARKER_TICK_LENGTH_PX * 0.5));
+            let trendSeries = buildTrendSeries(stat, {
+              prefix,
+              suffix,
+              decimals,
+              dataLabels,
+              marker,
+              lineWidth,
+              zoneColors: effectiveZoneColors,
+              labelLiftPx,
+              tickHeight: desiredTickHeight
+            });
+            if (typeof window.sanitizeSeriesCollection === 'function') {
+              trendSeries = window.sanitizeSeriesCollection(trendSeries);
+            } else if (!Array.isArray(trendSeries)) {
+              trendSeries = [];
+            }
+            const seriesOrigins = trendSeries.map((_, idx) => Math.min(idx, axisCount - 1));
+            trendSeries.forEach((seriesConfig, index) => {
+              if (!seriesConfig) return;
+              const originAxis = seriesOrigins[index] ?? 0;
+              seriesConfig.yAxis = 0;
+              seriesConfig.__originAxis = originAxis;
+              if (seriesConfig.zIndex == null) {
+                seriesConfig.zIndex = index === 0 ? 3 : 2;
+              }
+            });
+            processDataForLabels(trendSeries, axisBoundsList, {
+              labelLiftPx,
+              labelOffset: 10,
+              flipThreshold: stat && stat.isPercent ? 0.04 : 0.08
+            });
+            const Highcharts = window.Highcharts;
+            const userEvents = (chart && chart.events) || {};
+            const mergedEvents = {};
+            Object.keys(userEvents).forEach((key) => {
+              const handler = userEvents[key];
+              if (typeof handler !== 'function') {
+                mergedEvents[key] = handler;
+                return;
+              }
+              if (typeof mergedEvents[key] === 'function') {
+                const baseHandler = mergedEvents[key];
+                mergedEvents[key] = function mergedEvent(...args) {
+                  baseHandler.apply(this, args);
+                  handler.apply(this, args);
+                };
+              } else {
+                mergedEvents[key] = handler;
+              }
+            });
+
+            const chartOptions = {
+              chart: {
+                type: 'line',
+                backgroundColor: '#ffffff',
+                height,
+                spacing: chart.spacing || [24, 18, 24, 24],
+                events: mergedEvents
+              },
+              credits: { enabled: false },
+              exporting: { enabled: false },
+              title: { text: null },
+              xAxis: deepMerge({
+                categories,
+                lineColor: '#0f172a',
+                lineWidth: 2,
+                tickColor: '#0f172a',
+                tickLength: 11,
+                labels: {
+                  rotation: -90,
+                  align: 'center',
+                  x: 0,
+                  y: 45,
+                  style: { color: '#0f172a', fontSize: '12px', fontWeight: '600' }
+                }
+              }, xAxis),
+              yAxis: (() => {
+                const baseAxisConfig = {
+                  title: { text: null },
+                  lineColor: '#0f172a',
+                  lineWidth: 2,
+                  tickColor: '#0f172a',
+                  tickLength: 11,
+                  gridLineColor: 'rgba(15,23,42,0.12)',
+                  labels: {
+                    style: { color: '#0f172a', fontSize: '12px', fontWeight: '600' },
+                    align: 'right',
+                    x: -8,
+                    formatter() {
+                      const axisInstance = this.axis;
+                      const bounds = axisInstance && axisInstance.boundsInfo;
+                      const displayDecimals = bounds && Number.isFinite(bounds.displayDecimals)
+                        ? bounds.displayDecimals
+                        : (axisMagnitude < 10 ? 2 : decimals);
+                       const rendered = formatNumberForDisplay(this.value, displayDecimals, Highcharts, formatContext);
+                      return prefix + rendered + suffix;
+                    }
+                  }
+                };
+                if (axisCount <= 1) {
+                  const singleAxis = deepMerge({
+                    ...baseAxisConfig,
+                    min: primaryBounds.min,
+                    max: primaryBounds.max,
+                    tickPositions: primaryBounds.ticks,
+                    startOnTick: true,
+                    endOnTick: true,
+                    allowDecimals: primaryBounds.allowDecimals !== false,
+                    reversed: primaryBounds.reversed
+                  }, yAxis);
+                  const singleLabels = singleAxis.labels || (singleAxis.labels = {});
+                  if (singleLabels.align == null) {
+                    singleLabels.align = 'right';
+                  }
+                  if (singleLabels.x == null) {
+                    singleLabels.x = -8;
+                  }
+                  singleAxis.boundsInfo = primaryBounds;
+                  return singleAxis;
+                }
+                return axisBoundsList.map((bounds, index) => {
+                  const isPrimary = index === 0;
+                  const displayDecimals = bounds && Number.isFinite(bounds.displayDecimals)
+                    ? bounds.displayDecimals
+                    : (isPrimary ? decimals : Math.min(decimals, 2));
+                  const axisConfig = deepMerge({
+                    ...baseAxisConfig,
+                    min: bounds?.min,
+                    max: bounds?.max,
+                    tickPositions: bounds?.ticks,
+                    startOnTick: true,
+                    endOnTick: true,
+                    allowDecimals: bounds?.allowDecimals !== false,
+                    reversed: bounds?.reversed,
+                    visible: isPrimary,
+                    opposite: !isPrimary && index % 2 === 1
+                  }, yAxis);
+                  axisConfig.labels = axisConfig.labels || {};
+                  if (axisConfig.opposite) {
+                    if (axisConfig.labels.align == null) {
+                      axisConfig.labels.align = 'left';
+                    }
+                    if (axisConfig.labels.x == null) {
+                      axisConfig.labels.x = 8;
+                    }
+                  } else {
+                    if (axisConfig.labels.align == null) {
+                      axisConfig.labels.align = 'right';
+                    }
+                    if (axisConfig.labels.x == null) {
+                      axisConfig.labels.x = -8;
+                    }
+                  }
+                  const userFormatter = axisConfig.labels.formatter;
+                  axisConfig.labels.formatter = function patchedFormatter() {
+                    if (this.axis && axisConfig.boundsInfo) {
+                      this.axis.boundsInfo = axisConfig.boundsInfo;
+                    }
+                    if (typeof userFormatter === 'function') {
+                      return userFormatter.call(this);
+                    }
+                    const rendered = formatNumberForDisplay(this.value, displayDecimals, Highcharts, formatContext);
+                    return prefix + rendered + suffix;
+                  };
+                  axisConfig.userFormatter = userFormatter;
+                  axisConfig.boundsInfo = {
+                    ...bounds,
+                    displayDecimals
+                  };
+                  if (!isPrimary) {
+                    axisConfig.lineWidth = 0;
+                    axisConfig.tickLength = 0;
+                    axisConfig.gridLineWidth = 0;
+                    axisConfig.labels = axisConfig.labels || {};
+                    axisConfig.labels.enabled = false;
+                  }
+                  return axisConfig;
+                });
+              })(),
+              legend: { enabled: false },
+              tooltip: (() => {
+                const userTooltip = tooltip && typeof tooltip === 'object' ? tooltip : {};
+                const mergedTooltip = deepMerge({
+                  enabled: false,
+                  shared: false,
+                  useHTML: false,
+                  animation: false,
+                  borderWidth: 0,
+                  shadow: false,
+                  backgroundColor: 'rgba(255,255,255,0)'
+                }, userTooltip);
+                mergedTooltip.enabled = false;
+                mergedTooltip.shared = false;
+                mergedTooltip.useHTML = false;
+                mergedTooltip.formatter = undefined;
+                mergedTooltip.pointFormatter = undefined;
+                mergedTooltip.headerFormat = '';
+                mergedTooltip.pointFormat = '';
+                mergedTooltip.footerFormat = '';
+                return mergedTooltip;
+              })(),
+              plotOptions: deepMerge({
+                series: {
+                  marker: deepMerge({ enabled: false, radius: 0, lineWidth: 0, symbol: 'circle' }, marker),
+                  lineWidth: lineWidth || 3.6,
+                  connectNulls: false,
+                  dataLabels: {
+                    enabled: true,
+                    useHTML: true,
+                    textPath: null,
+                    padding: 0,
+                    allowOverlap: true,
+                    crop: false,
+                    overflow: "none",
+                    zIndex: 5,
+                    formatter: function () {
+                      if (!this.point || this.y == null || !Number.isFinite(this.y)) {
+                        return "";
+                      }
+                      if (typeof window.__staffLabelEngine === 'function') {
+                        try {
+                          return window.__staffLabelEngine.call(this, this.point);
+                        } catch (error) {
+                          /* fall back below */
+                        }
+                      }
+                      return window.__staffLabelEngine ? window.__staffLabelEngine(this.point) : String(this.y);
+                    }
+                  }
+                }
+              }, plotOptions),
+              series: trendSeries
+            };
+
+            ensureSoftWhiteHaloFilter();
+            ensureChartDecorators();
+
+            if (Array.isArray(chartOptions.series)) {
+              chartOptions.series = chartOptions.series.map((seriesConfig) => {
+                if (!seriesConfig || typeof seriesConfig !== 'object' || !Array.isArray(seriesConfig.data)) {
+                  return seriesConfig;
+                }
+                let sanitizedData;
+                if (typeof sanitizeSeriesDataArray === 'function') {
+                  const result = sanitizeSeriesDataArray(seriesConfig.data);
+                  if (result && Array.isArray(result.data)) {
+                    sanitizedData = result.data;
+                  }
+                }
+                if (!Array.isArray(sanitizedData)) {
+                  const pointSanitizer =
+                    (typeof sanitizePointForSeries === 'function' && sanitizePointForSeries)
+                    || (typeof window !== 'undefined' && typeof window.sanitizePointForSeries === 'function'
+                      ? window.sanitizePointForSeries
+                      : (value) => {
+                          if (value == null) {
+                            return createNullPoint();
+                          }
+                          if (typeof value === 'number') {
+                            return Number.isFinite(value) ? value : createNullPoint();
+                          }
+                          if (Array.isArray(value)) {
+                            if (!value.length) {
+                              return createNullPoint();
+                            }
+                            const hasX = value.length >= 2;
+                            const rawX = hasX ? value[0] : undefined;
+                            const rawY = value[hasX ? 1 : 0];
+                            const numericY = Number(rawY);
+                            if (!Number.isFinite(numericY)) {
+                              return hasX && Number.isFinite(Number(rawX))
+                                ? createNullPoint({ x: Number(rawX) })
+                                : createNullPoint();
+                            }
+                            const clone = value.slice();
+                            if (hasX && Number.isFinite(Number(rawX))) {
+                              clone[0] = Number(rawX);
+                            }
+                            clone[hasX ? 1 : 0] = numericY;
+                            return clone;
+                          }
+                          if (typeof value === 'object') {
+                            const clone = { ...value };
+                            const numericY = Number(clone.y);
+                            if (!Number.isFinite(numericY)) {
+                              return createNullPoint(clone);
+                            }
+                            clone.y = numericY;
+                            return clone;
+                          }
+                          const numeric = Number(value);
+                          return Number.isFinite(numeric) ? numeric : createNullPoint();
+                        });
+
+                  sanitizedData = seriesConfig.data.map((point) => pointSanitizer(point));
+                }
+                return { ...seriesConfig, data: sanitizedData };
+              });
+            }
+
+            (chartOptions.series || []).forEach((seriesConfig) => {
+              if (!seriesConfig || typeof seriesConfig !== 'object') return;
+              const dataLabelsConfig = (seriesConfig.dataLabels && typeof seriesConfig.dataLabels === 'object')
+                ? seriesConfig.dataLabels
+                : (seriesConfig.dataLabels = {});
+
+              if (dataLabelsConfig.enabled == null) dataLabelsConfig.enabled = true;
+              if (dataLabelsConfig.align == null) dataLabelsConfig.align = 'center';
+              if (dataLabelsConfig.verticalAlign == null) dataLabelsConfig.verticalAlign = 'top';
+              if (dataLabelsConfig.useHTML == null) dataLabelsConfig.useHTML = true;
+              if (dataLabelsConfig.allowOverlap == null) dataLabelsConfig.allowOverlap = true;
+              if (dataLabelsConfig.crop == null) dataLabelsConfig.crop = false;
+              if (dataLabelsConfig.overflow == null) dataLabelsConfig.overflow = 'none';
+              if (dataLabelsConfig.y == null) dataLabelsConfig.y = 0;
+              if (dataLabelsConfig.padding == null) dataLabelsConfig.padding = 0;
+              if (dataLabelsConfig.zIndex == null) dataLabelsConfig.zIndex = 5;
+              // Keep wrapper unrotated so the faux tick stays vertical; inner span handles numeric rotation.
+              dataLabelsConfig.rotation = 0;
+                
+
+
+
+
+
+            });
+
+            if (chartOptions && chartOptions.series) {
+              chartOptions.series.forEach((seriesConfig, seriesIndex) => {
+                if (!seriesConfig || !Array.isArray(seriesConfig.data)) return;
+                seriesConfig.data = seriesConfig.data.map((point, pointIndex) => {
+                  if (point == null) {
+                    console.warn(`🧹 Sanitizing invalid value in series[${seriesIndex}] point[${pointIndex}]`, point);
+                    return createNullPoint();
+                  }
+                  if (typeof point === 'number') {
+                    if (!Number.isFinite(point)) {
+                      console.warn(`🧹 Sanitizing invalid value in series[${seriesIndex}] point[${pointIndex}]`, point);
+                      return createNullPoint();
+                    }
+                    return { x: pointIndex, y: point };
+                  }
+                  if (Array.isArray(point)) {
+                    const normalized = normalizePointForLabels(point, pointIndex);
+                    if (!Number.isFinite(normalized.y)) {
+                      console.warn(`🧹 Sanitizing invalid value in series[${seriesIndex}] point[${pointIndex}]`, point);
+                      return createNullPoint({ x: normalized.x });
+                    }
+                    return normalized;
+                  }
+                  if (typeof point === 'object') {
+                    const numericValue = Number(point.y);
+                    if (!Number.isFinite(numericValue)) {
+                      console.warn(`🧹 Sanitizing invalid value in series[${seriesIndex}] point[${pointIndex}]`, point);
+                      return createNullPoint(point);
+                    }
+                    return { ...point, y: numericValue };
+                  }
+                  const numericValue = Number(point);
+                  if (!Number.isFinite(numericValue)) {
+                    console.warn(`🧹 Sanitizing invalid value in series[${seriesIndex}] point[${pointIndex}]`, point);
+                    return createNullPoint();
+                  }
+                  return { x: pointIndex, y: numericValue };
+                });
+              });
+            }
+
+            const chartInstance = Highcharts.chart(container, chartOptions);
+            installDroplines(chartInstance);
+
+            const context = {
+              container,
+              stat,
+              axisOptions,
+              chartKey,
+              axisStats,
+              autoBounds: axisBoundsList,
+              seriesOrigins
+            };
+            chartInstance.__scaleContext = context;
+            chartInstance.__seriesOrigins = seriesOrigins.slice();
+            chartInstance.__rebindSeries = (overrides) => rebindChartSeries(chartInstance, context, overrides);
+
+            applyAutoScaling(chartInstance, context);
+            rebindChartSeries(chartInstance, context);
+            chartInstance.redraw();
+
+            const storedOverrides = fetchManualScaleOverrides(chartKey);
+            if (Object.keys(storedOverrides).length) {
+              applyManualOverrides(chartInstance, storedOverrides, context);
+            }
+
+            attachScalingControls(chartInstance, context);
+
+            return chartInstance;
+          }
+
+          return {
+            computeAxisBounds,
+            buildTrendSeries,
+            renderLineChart,
+            attachScalingControls,
+            applyManualOverrides,
+            applyAutoScaling,
+            constants: measurementConstants
+          };
+        })();
+      };
+
+      const childRenderSource = () => {
+        const ensureScaleHelpers = () => {
+          if (window.__BOOKLET_SCALE_KEY_HELPERS__) {
+            return window.__BOOKLET_SCALE_KEY_HELPERS__;
+          }
+          const normalizeManualScaleKeyPart = (value, fallback) => {
+            const source = value == null || value === '' ? fallback : value;
+            if (source == null || source === '') return '';
+            let text = String(source);
+            if (typeof text.normalize === 'function') {
+              text = text.normalize('NFKD').replace(/[\u0300-\u036F]/g, '');
+            }
+            return text
+              .trim()
+              .toLowerCase()
+              .replace(/[:|]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          };
+
+          const ensureStatManualScaleKey = (division, staff, stat, indices = {}) => {
+            if (!stat || typeof stat !== 'object') {
+              const divisionIndex = Number.isFinite(indices.division) ? indices.division : 0;
+              const staffIndex = Number.isFinite(indices.staff) ? indices.staff : 0;
+              const statIndex = Number.isFinite(indices.stat) ? indices.stat : 0;
+              return `chart-${divisionIndex}-${staffIndex}-${statIndex}`;
+            }
+            if (typeof stat.manualScaleKey === 'string' && stat.manualScaleKey.length) {
+              return stat.manualScaleKey;
+            }
+            const divisionIndex = Number.isFinite(indices.division) ? indices.division : 0;
+            const staffIndex = Number.isFinite(indices.staff) ? indices.staff : 0;
+            const statIndex = Number.isFinite(indices.stat) ? indices.stat : 0;
+            const parts = [];
+            const divisionPart = normalizeManualScaleKeyPart(division && division.name, `division-${divisionIndex + 1}`);
+            if (divisionPart) parts.push(divisionPart);
+            const staffNamePart = normalizeManualScaleKeyPart(staff && staff.staffName, `staff-${staffIndex + 1}`);
+            if (staffNamePart) parts.push(staffNamePart);
+            const staffPostPart = normalizeManualScaleKeyPart(staff && staff.post);
+            if (staffPostPart) parts.push(staffPostPart);
+            const statKeyPart = normalizeManualScaleKeyPart(stat && stat.key, `stat-${statIndex + 1}`);
+            if (statKeyPart) parts.push(statKeyPart);
+            const statLabelPart = normalizeManualScaleKeyPart(stat && stat.displayName);
+            if (statLabelPart && statLabelPart !== statKeyPart) {
+              parts.push(statLabelPart);
+            }
+            const manualKey = parts.filter(Boolean).join('::') || `chart-${divisionIndex}-${staffIndex}-${statIndex}`;
+            stat.manualScaleKey = manualKey;
+            return manualKey;
+          };
+
+          const slugifyForId = (value, fallback = 'item') => {
+            let text = value == null ? '' : String(value);
+            if (typeof text.normalize === 'function') {
+              text = text.normalize('NFKD').replace(/[\u0300-\u036F]/g, '');
+            }
+            const slug = text
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            return slug || fallback;
+          };
+
+          const helpers = { ensureStatManualScaleKey, slugifyForId };
+          window.__BOOKLET_SCALE_KEY_HELPERS__ = helpers;
+          return helpers;
+        };
+
+        const { ensureStatManualScaleKey, slugifyForId } = ensureScaleHelpers();
+  const data = window.__BOOKLET_DATA || { divisions: [] };
+  const showDataLabels = data.showDataLabels === true;
+        const printBtn = document.getElementById('printBtn');
+        if (printBtn) printBtn.addEventListener('click', () => window.print());
+        const wrapper = document.getElementById('pages');
+        if (!wrapper) return;
+
+        const pages = [];
+        const charts = [];
+
+        if (!window.__BOOKLET_SHARED_RUNTIME__) {
+          console.error('Shared chart runtime unavailable.');
+          return;
+        }
+    const sharedRuntime = window.__BOOKLET_SHARED_RUNTIME__;
+  const axisDefaults = { desiredTickCount: 6, padFraction: 0.08, clampZero: true, minimumTickInterval: 5, allowMultipleAxes: true };
+    const measurement = (sharedRuntime && sharedRuntime.constants) || null;
+    const DEFAULT_CM_TO_PX = 37.7952755906;
+  const fallbackTick = Math.round(0.4 * DEFAULT_CM_TO_PX);
+  const fallbackClearance = Math.max(1, Math.round(0.04 * DEFAULT_CM_TO_PX));
+    const MARKER_TICK_LENGTH_PX = Number.isFinite(measurement?.MARKER_TICK_LENGTH_PX)
+      ? measurement.MARKER_TICK_LENGTH_PX
+      : fallbackTick;
+    const LABEL_CLEARANCE_PX = Number.isFinite(measurement?.LABEL_CLEARANCE_PX)
+      ? measurement.LABEL_CLEARANCE_PX
+      : fallbackClearance;
+    const LABEL_LIFT_PX = Number.isFinite(measurement?.LABEL_RISER_OFFSET_PX)
+      ? measurement.LABEL_RISER_OFFSET_PX
+      : MARKER_TICK_LENGTH_PX + LABEL_CLEARANCE_PX;
+
+        function escapeHtml(str) {
+          return String(str || '').replace(/[&<>"]|'/g, (c) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+          }[c]));
+        }
+
+        function textToHtml(str) {
+          return escapeHtml(str).replace(/\n/g, '<br>');
+        }
+
+        function splitVfpText(raw) {
+          const normalized = String(raw || '').replace(/\r\n?/g, '\n');
+          const parts = normalized
+            .split(/\n{2,}/)
+            .map((segment) => segment.trim())
+            .filter((segment) => segment.length);
+          return parts.length ? parts : ['VFP'];
+        }
+
+        function formatRange() {
+          if (!data.earliest || !data.latest) return '';
+          const start = new Date(data.earliest);
+          const end = new Date(data.latest);
+          if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return '';
+          const fmt = (d) => {
+            const day = d.getDate();
+            const mon = d.toLocaleDateString(undefined, { month: 'short' });
+            const yr = d.toLocaleDateString(undefined, { year: '2-digit' });
+            return `${day} ${mon} ${yr}`;
+          };
+          const startLabel = fmt(start);
+          const endLabel = fmt(end);
+          return startLabel === endLabel ? endLabel : `${startLabel} – ${endLabel}`;
+        }
+
+        function formatMeta(staff) {
+          const parts = [];
+          if (staff.post) parts.push(staff.post);
+          if (staff.staffName) parts.push(staff.staffName);
+          return parts.map(escapeHtml).join('<br>');
+        }
+
+        const rangeLabel = formatRange();
+
+        const renderCoverPage = ({ title, subtitle, range, logo }) => `
+          <section class="page page-cover" style="--base: #ffffff;">
+            <div class="page-inner">
+              <h1>${escapeHtml(title)}</h1>
+              ${subtitle ? `<h2>${escapeHtml(subtitle)}</h2>` : ''}
+              ${range ? `<div class="text-uppercase" style="letter-spacing:0.24em;color:rgba(15,23,42,0.6);font-weight:700;">${escapeHtml(range)}</div>` : ''}
+              ${logo ? `<img src="${logo}" alt="Logo" />` : ''}
+            </div>
+          </section>`;
+
+        const renderDivisionLogoPage = ({ baseColor, logo }) => `
+          <section class="page page-logo" style="--base:${baseColor};">
+            <div class="page-inner" style="background: radial-gradient(circle at center, rgba(255,255,255,0.92) 0%, ${baseColor} 72%);">
+              <img src="${logo}" alt="Division Logo" />
+            </div>
+          </section>`;
+
+        const renderVfpPage = ({ division, classes, baseColor, textColor, accentColor, encodedParagraphs, initialParagraph }) => {
+          const rawName = division && typeof division.name === 'string' ? division.name.trim() : '';
+          const headingMarkup = rawName ? `<h2>${escapeHtml(rawName)} DIVISION</h2>` : '';
+          return `
+          <section class="page page-vfp${classes}" style="--base:${baseColor};">
+            <div class="page-inner" style="color:${textColor};">
+              <div class="vfp-body">
+                <div class="vfp-heading">
+                  ${headingMarkup}
+                  <div class="vfp-label" style="color:${accentColor};">VFP</div>
+                </div>
+                <div class="vfp-text" data-paragraphs="${encodedParagraphs}">${initialParagraph}</div>
+              </div>
+            </div>
+          </section>`;
+        };
+
+        const renderStatPage = ({ division, staff, stat, chartId }) => `
+          <section class="page page-stat" style="--base:${division.color.base};">
+            <div class="page-inner">
+              <div class="info">
+                <h3>${escapeHtml(stat.title || stat.displayName)}</h3>
+                <div class="meta">${formatMeta(staff) || '&nbsp;'}</div>
+              </div>
+              <div class="divider"></div>
+              <div class="chart" id="${chartId}"></div>
+            </div>
+          </section>`;
+
+        const renderClosingLogoPage = (logo) => `
+          <section class="page page-logo" style="--base:#ffffff;">
+            <div class="page-inner" style="background: radial-gradient(circle at center, rgba(255,255,255,0.95) 0%, #ffffff 70%);">
+              <img src="${logo}" alt="Logo" />
+            </div>
+          </section>`;
+
+        pages.push(renderCoverPage({
+          title: data.title || 'Weekly BP',
+          subtitle: data.subtitle || '',
+          range: rangeLabel,
+          logo: data.logo || ''
+        }));
+
+        data.divisions.forEach((division, di) => {
+          if (data.logo) {
+            const logoBase = division.color && division.color.base ? division.color.base : '#ffffff';
+            pages.push(renderDivisionLogoPage({ baseColor: logoBase, logo: data.logo }));
+          }
+
+          const vfpScale = division.vfpScale === 'compact' || division.vfpScale === 'large' ? division.vfpScale : 'normal';
+          const vfpAlign = ['left', 'right', 'center'].includes(division.vfpAlign) ? division.vfpAlign : 'center';
+          const vfpWidth = ['standard', 'wide', 'narrow'].includes(division.vfpWidth) ? division.vfpWidth : 'standard';
+          const vfpFont = ['small', 'large', 'xlarge'].includes(division.vfpFont) ? division.vfpFont : 'medium';
+          const scaleClass = vfpScale === 'normal' ? '' : ` scale-${vfpScale}`;
+          const alignClass = vfpAlign === 'center' ? '' : ` align-${vfpAlign}`;
+          const widthClass = vfpWidth === 'standard' ? '' : ` width-${vfpWidth}`;
+          const fontClass = vfpFont === 'medium' ? '' : ` font-${vfpFont}`;
+          const accentColor = division.color && division.color.accent ? division.color.accent : '#334155';
+          const baseColor = division.color && division.color.base ? division.color.base : '#f8fafc';
+          const textColor = division.color && division.color.text ? division.color.text : '#0F172A';
+          const paragraphs = splitVfpText(division.vfpText || 'VFP');
+          const paragraphHtml = paragraphs.map((paragraph) => textToHtml(paragraph));
+          const encodedParagraphs = encodeURIComponent(JSON.stringify(paragraphHtml));
+          const initialParagraph = paragraphHtml[0] || textToHtml('VFP');
+          pages.push(renderVfpPage({
+            division,
+            classes: `${scaleClass}${alignClass}${widthClass}${fontClass}`,
+            baseColor,
+            textColor,
+            accentColor,
+            encodedParagraphs,
+            initialParagraph
+          }));
+
+          division.staff.forEach((staff, si) => {
+            staff.stats.forEach((stat, ti) => {
+              const manualScaleKey = ensureStatManualScaleKey(division, staff, stat, { division: di, staff: si, stat: ti });
+              const fallbackId = `${di}-${si}-${ti}`;
+              const slugSource = `${manualScaleKey} ${fallbackId}`;
+              const chartId = `chart-${slugifyForId(slugSource, fallbackId)}`;
+              charts.push({ id: chartId, stat, chartKey: manualScaleKey });
+              pages.push(renderStatPage({ division, staff, stat, chartId }));
+            });
+          });
+        });
+
+        if (data.logo) {
+          pages.push(renderClosingLogoPage(data.logo));
+        }
+
+        wrapper.innerHTML = pages.join('');
+
+        function layoutVfpPages() {
+          const sections = Array.from(wrapper.querySelectorAll('.page-vfp'));
+          sections.forEach((section) => {
+            const textHolder = section.querySelector('.vfp-text');
+            if (!textHolder) return;
+            const dataAttr = textHolder.getAttribute('data-paragraphs');
+            if (!dataAttr) return;
+            let paragraphs;
+            try {
+              paragraphs = JSON.parse(decodeURIComponent(dataAttr));
+            } catch (err) {
+              paragraphs = [textHolder.innerHTML || ''];
+            }
+            if (!Array.isArray(paragraphs) || !paragraphs.length) {
+              paragraphs = [textHolder.innerHTML || ''];
+            }
+            textHolder.removeAttribute('data-paragraphs');
+            const template = section.cloneNode(true);
+            const templateHolder = template.querySelector('.vfp-text');
+            if (templateHolder) {
+              templateHolder.innerHTML = '';
+              templateHolder.removeAttribute('data-paragraphs');
+            }
+            const templateHeading = template.querySelector('.vfp-heading');
+            const continuationTemplate = template.cloneNode(true);
+            const continuationHolder = continuationTemplate.querySelector('.vfp-text');
+            if (continuationHolder) {
+              continuationHolder.innerHTML = '';
+            }
+            const continuationHeading = continuationTemplate.querySelector('.vfp-heading');
+            if (continuationHeading && continuationHeading.parentNode) {
+              continuationHeading.parentNode.removeChild(continuationHeading);
+            }
+            const templateInner = template.querySelector('.page-inner');
+            const baseHolder = textHolder;
+            const baseInner = section.querySelector('.page-inner');
+            baseHolder.innerHTML = '';
+
+            let currentSection = section;
+            let currentHolder = baseHolder;
+            let currentInner = baseInner;
+
+            function appendToNewPage(paragraphEl) {
+              const newSection = continuationTemplate.cloneNode(true);
+              const newHolder = newSection.querySelector('.vfp-text');
+              const newInner = newSection.querySelector('.page-inner');
+              if (newHolder) {
+                newHolder.innerHTML = '';
+                newHolder.removeAttribute('data-paragraphs');
+                newHolder.appendChild(paragraphEl);
+              }
+              const parent = currentSection.parentNode;
+              if (parent) {
+                parent.insertBefore(newSection, currentSection.nextSibling);
+              }
+              currentSection = newSection;
+              currentHolder = newHolder;
+              currentInner = newInner;
+              currentSection.classList.add('page-vfp-continuation');
+            }
+
+            paragraphs.forEach((html) => {
+              const paragraphEl = document.createElement('p');
+              paragraphEl.innerHTML = html;
+              currentHolder.appendChild(paragraphEl);
+              if (currentInner && currentInner.scrollHeight > currentInner.clientHeight + 2) {
+                currentHolder.removeChild(paragraphEl);
+                appendToNewPage(paragraphEl);
+              }
+            });
+          });
+        }
+
+        layoutVfpPages();
+
+        function renderChart(cfg) {
+          const { id, stat, chartKey } = cfg || {};
+          const container = document.getElementById(id);
+          if (!container) return;
+          const inner = container.closest('.page-inner');
+          const available = inner ? inner.clientHeight : container.parentElement ? container.parentElement.clientHeight : 640;
+          const chartHeight = Math.max(available - 60, 520);
+          container.style.height = chartHeight + 'px';
+          container.style.width = '100%';
+          sharedRuntime.renderLineChart({
+            container,
+            stat,
+            chartKey,
+            height: chartHeight,
+            categories: stat.dates,
+            numberFormat: {
+              prefix: stat.isMoney ? '$' : '',
+              suffix: stat.isPercent ? '%' : ''
+            },
+            chart: { spacing: [24, 18, 24, 24] },
+            xAxis: {
+              labels: {
+                rotation: -90,
+                align: 'center',
+                x: 0,
+                y: 45
+              }
+            },
+            dataLabels: showDataLabels
+              ? {
+                  enabled: true,
+                  align: 'center',
+                  verticalAlign: 'bottom',
+                  backgroundColor: 'transparent',
+                  borderRadius: 0,
+                  borderWidth: 0,
+                  padding: 0,
+                  style: {
+                    fontWeight: '700',
+                    color: '#0f172a',
+                    textOutline: 'none'
+                  }
+                }
+              : { enabled: false },
+            marker: { radius: 3, lineWidth: 1.2 },
+            lineWidth: 3.6,
+            axis: { ...axisDefaults },
+            showDataLabels
+          });
+        }
+
+        charts.forEach(renderChart);
+
+        setTimeout(() => {
+          if (!window.Highcharts || !Array.isArray(window.Highcharts.charts)) return;
+          window.Highcharts.charts.forEach((c, ci) => {
+            if (!c) return;
+            const title = (c.title && c.title.textStr) || 'no title';
+            console.group(`Chart[${ci}] (${title})`);
+            console.log('rendered:', !!c.hasRendered, 'height:', c.chartHeight, 'yAxis.len:', c.yAxis[0]?.len);
+            c.series.forEach((s, si) => {
+              const badPoints = (s.points || []).filter((p) => !Number.isFinite(p.plotY) || !Number.isFinite(p.y));
+              if (badPoints.length) {
+                console.warn(`Series[${si}] ${s.name} has ${badPoints.length} invalid points`, badPoints.map((p) => p.category));
+              }
+            });
+            console.groupEnd();
+          });
+        }, 600);
+      };
+
+      const childGraphRenderSource = () => {
+        const ensureScaleHelpers = () => {
+          if (window.__BOOKLET_SCALE_KEY_HELPERS__) {
+            return window.__BOOKLET_SCALE_KEY_HELPERS__;
+          }
+          const normalizeManualScaleKeyPart = (value, fallback) => {
+            const source = value == null || value === '' ? fallback : value;
+            if (source == null || source === '') return '';
+            let text = String(source);
+            if (typeof text.normalize === 'function') {
+              text = text.normalize('NFKD').replace(/[\u0300-\u036F]/g, '');
+            }
+            return text
+              .trim()
+              .toLowerCase()
+              .replace(/[:|]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          };
+
+          const ensureStatManualScaleKey = (division, staff, stat, indices = {}) => {
+            if (!stat || typeof stat !== 'object') {
+              const divisionIndex = Number.isFinite(indices.division) ? indices.division : 0;
+              const staffIndex = Number.isFinite(indices.staff) ? indices.staff : 0;
+              const statIndex = Number.isFinite(indices.stat) ? indices.stat : 0;
+              return `chart-${divisionIndex}-${staffIndex}-${statIndex}`;
+            }
+            if (typeof stat.manualScaleKey === 'string' && stat.manualScaleKey.length) {
+              return stat.manualScaleKey;
+            }
+            const divisionIndex = Number.isFinite(indices.division) ? indices.division : 0;
+            const staffIndex = Number.isFinite(indices.staff) ? indices.staff : 0;
+            const statIndex = Number.isFinite(indices.stat) ? indices.stat : 0;
+            const parts = [];
+            const divisionPart = normalizeManualScaleKeyPart(division && division.name, `division-${divisionIndex + 1}`);
+            if (divisionPart) parts.push(divisionPart);
+            const staffNamePart = normalizeManualScaleKeyPart(staff && staff.staffName, `staff-${staffIndex + 1}`);
+            if (staffNamePart) parts.push(staffNamePart);
+            const staffPostPart = normalizeManualScaleKeyPart(staff && staff.post);
+            if (staffPostPart) parts.push(staffPostPart);
+            const statKeyPart = normalizeManualScaleKeyPart(stat && stat.key, `stat-${statIndex + 1}`);
+            if (statKeyPart) parts.push(statKeyPart);
+            const statLabelPart = normalizeManualScaleKeyPart(stat && stat.displayName);
+            if (statLabelPart && statLabelPart !== statKeyPart) {
+              parts.push(statLabelPart);
+            }
+            const manualKey = parts.filter(Boolean).join('::') || `chart-${divisionIndex}-${staffIndex}-${statIndex}`;
+            stat.manualScaleKey = manualKey;
+            return manualKey;
+          };
+
+          const slugifyForId = (value, fallback = 'item') => {
+            let text = value == null ? '' : String(value);
+            if (typeof text.normalize === 'function') {
+              text = text.normalize('NFKD').replace(/[\u0300-\u036F]/g, '');
+            }
+            const slug = text
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            return slug || fallback;
+          };
+
+          const helpers = { ensureStatManualScaleKey, slugifyForId };
+          window.__BOOKLET_SCALE_KEY_HELPERS__ = helpers;
+          return helpers;
+        };
+
+  const { ensureStatManualScaleKey, slugifyForId } = ensureScaleHelpers();
+  const data = window.__BOOKLET_DATA || { divisions: [] };
+  const showDataLabels = data.showDataLabels === true;
+        const printBtn = document.getElementById('printBtn');
+        if (printBtn) printBtn.addEventListener('click', () => window.print());
+        const wrapper = document.getElementById('pages');
+        if (!wrapper) return;
+
+        const headingMode = data.headingMode || 'stat';
+        const layoutMode = data.layoutMode || 'top';
+        const showLogo = !!(data.logo && data.logoMode === 'show');
+        const pages = [];
+        const charts = [];
+
+        if (!window.__BOOKLET_SHARED_RUNTIME__) {
+          console.error('Shared chart runtime unavailable.');
+          return;
+        }
+  const sharedRuntime = window.__BOOKLET_SHARED_RUNTIME__;
+  const axisDefaults = { desiredTickCount: 6, padFraction: 0.08, clampZero: true, minimumTickInterval: 5, allowMultipleAxes: true };
+  const measurement = (sharedRuntime && sharedRuntime.constants) || null;
+  const DEFAULT_CM_TO_PX = 37.7952755906;
+  const fallbackTick = Math.round(0.4 * DEFAULT_CM_TO_PX);
+  const fallbackClearance = Math.max(1, Math.round(0.04 * DEFAULT_CM_TO_PX));
+  const MARKER_TICK_LENGTH_PX = Number.isFinite(measurement?.MARKER_TICK_LENGTH_PX)
+    ? measurement.MARKER_TICK_LENGTH_PX
+    : fallbackTick;
+  const LABEL_CLEARANCE_PX = Number.isFinite(measurement?.LABEL_CLEARANCE_PX)
+    ? measurement.LABEL_CLEARANCE_PX
+    : fallbackClearance;
+  const LABEL_LIFT_PX = Number.isFinite(measurement?.LABEL_RISER_OFFSET_PX)
+    ? measurement.LABEL_RISER_OFFSET_PX
+    : MARKER_TICK_LENGTH_PX + LABEL_CLEARANCE_PX;
+
+        function escapeHtml(str) {
+          return String(str || '').replace(/[&<>"']|`/g, (c) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+            '`': '&#96;'
+          }[c]));
+        }
+
+        const metaLabel = data.subtitle ? String(data.subtitle).trim() : '';
+
+        function renderGraphPage({ layoutMode: mode, showLogo: allowLogo, divisionLabel, primaryTitle, secondaryTitle, metaLabelText, chartId, logo }) {
+          const safeDivision = (divisionLabel || '').trim();
+          const safePrimary = (primaryTitle || '').trim();
+          const safeSecondary = (secondaryTitle || '').trim();
+          const safeMeta = (metaLabelText || '').trim();
+          const overlineMarkup = safeDivision ? `<div class="page-graph-overline">${escapeHtml(safeDivision)}</div>` : '';
+          const primaryMarkup = safePrimary ? `<h3 class="page-graph-title">${escapeHtml(safePrimary)}</h3>` : '';
+          const secondaryMarkup = safeSecondary ? `<div class="page-graph-subtitle">${escapeHtml(safeSecondary)}</div>` : '';
+          const metaMarkup = safeMeta ? `<div class="page-graph-meta">${escapeHtml(safeMeta)}</div>` : '';
+
+          if (mode === 'side') {
+            const logoBlock = allowLogo && logo
+              ? `<div class="page-graph-logo side"><img src="${logo}" alt="Logo" /></div>`
+              : '';
+            return `
+                  <section class="page page-graph page-graph-side">
+                    <div class="page-graph-inner split">
+                      <div class="page-graph-info">
+                        ${logoBlock}
+                        ${overlineMarkup}
+                        ${primaryMarkup}
+                        ${secondaryMarkup}
+                        ${metaMarkup}
+                      </div>
+                      <div class="page-graph-divider"></div>
+                      <div class="page-graph-chart">
+                        <div class="chart" id="${chartId}"></div>
+                      </div>
+                    </div>
+                  </section>`;
+          }
+
+          const headerClass = allowLogo && logo ? 'page-graph-header simple with-logo' : 'page-graph-header simple';
+          const logoBlock = allowLogo && logo
+            ? `<div class="page-graph-logo top"><img src="${logo}" alt="Logo" /></div>`
+            : '';
+          return `
+                  <section class="page page-graph">
+                    <div class="page-graph-inner">
+                      <div class="${headerClass}">
+                        ${logoBlock}
+                        <div class="page-graph-titles">
+                          ${overlineMarkup}
+                          ${primaryMarkup}
+                          ${secondaryMarkup}
+                          ${metaMarkup}
+                        </div>
+                      </div>
+                      <div class="page-graph-chart">
+                        <div class="chart" id="${chartId}"></div>
+                      </div>
+                    </div>
+                  </section>`;
+        }
+
+        data.divisions.forEach((division, di) => {
+          division.staff.forEach((staff, si) => {
+            staff.stats.forEach((stat, ti) => {
+              const manualScaleKey = ensureStatManualScaleKey(division, staff, stat, { division: di, staff: si, stat: ti });
+              const fallbackId = `${di}-${si}-${ti}`;
+              const slugSource = `${manualScaleKey} ${fallbackId}`;
+              const chartId = `graph-chart-${slugifyForId(slugSource, fallbackId)}`;
+              charts.push({ id: chartId, stat, chartKey: manualScaleKey });
+
+              const staffName = (staff.staffName || '').trim();
+              const staffPost = (staff.post || '').trim();
+              const statLabel = (stat.title || stat.displayName || '').trim();
+
+              const primaryTitle = headingMode === 'staff'
+                ? (staffName || staffPost || '')
+                : (statLabel || 'Stat');
+              const secondaryTitle = headingMode === 'staff'
+                ? (statLabel || '')
+                : [staffPost, staffName].filter(Boolean).join(' • ');
+
+              const divisionLabel = division.name && division.name.trim() ? division.name.trim() : '';
+
+              pages.push(renderGraphPage({
+                layoutMode,
+                showLogo,
+                divisionLabel,
+                primaryTitle,
+                secondaryTitle,
+                metaLabelText: metaLabel,
+                chartId,
+                logo: data.logo
+              }));
+            });
+          });
+        });
+
+        wrapper.innerHTML = pages.join('');
+
+        function renderChart(cfg) {
+          const { id, stat, chartKey } = cfg || {};
+          const container = document.getElementById(id);
+          if (!container) return;
+          const holder = container.parentElement;
+          const holderHeight = holder ? holder.clientHeight : 600;
+          const reserve = Math.max(Math.min(holderHeight * 0.01, 6), 2);
+          let chartHeight = holderHeight - reserve;
+          chartHeight = Math.max(chartHeight, 440);
+          if (chartHeight > holderHeight - 6) {
+            chartHeight = Math.max(holderHeight - 6, 360);
+          }
+          const resolvedHeight = Math.round(chartHeight);
+          container.style.height = resolvedHeight + 'px';
+          container.style.width = '100%';
+          container.style.marginTop = '4px';
+
+          sharedRuntime.renderLineChart({
+            container,
+            stat,
+            chartKey,
+            height: resolvedHeight,
+            categories: stat.dates,
+            numberFormat: {
+              prefix: stat.isMoney ? '$' : '',
+              suffix: stat.isPercent ? '%' : ''
+            },
+            chart: { spacing: [12, 12, 18, 12] },
+            xAxis: {
+              labels: {
+                rotation: -90,
+                align: 'center',
+                x: 0,
+                y: 34
+              }
+            },
+            dataLabels: showDataLabels
+              ? {
+                  enabled: true,
+                  align: 'center',
+                  verticalAlign: 'bottom',
+                  rotation: 0,
+                  backgroundColor: 'rgba(255,255,255,0.9)',
+                  borderRadius: 8,
+                  padding: 4,
+                  style: {
+                    fontWeight: '700',
+                    color: '#0f172a'
+                  }
+                }
+              : { enabled: false },
+            marker: { radius: 3, lineWidth: 1.2 },
+            lineWidth: 3.3,
+            axis: { ...axisDefaults },
+            showDataLabels
+          });
+        }
+
+        charts.forEach(renderChart);
+      };
+
+      const graphModeKeyConfig = (typeof window !== 'undefined' && window.__BOOKLET_GRAPH_MODE_KEYS__)
+        ? window.__BOOKLET_GRAPH_MODE_KEYS__
+        : { CSV_SESSION_KEY: 'graphmode:csvText', STORAGE_PREFIX: 'graphmode:payload:' };
+      const GRAPH_MODE_CSV_SESSION_KEY = graphModeKeyConfig.CSV_SESSION_KEY;
+      const GRAPH_MODE_STORAGE_PREFIX = graphModeKeyConfig.STORAGE_PREFIX;
+      let graphModeSessionCounter = 0;
+
+      if (typeof window !== 'undefined') {
+        window.__BOOKLET_GRAPH_MODE_KEYS__ = graphModeKeyConfig;
+        window.__BOOKLET_CHILD_RUNTIME_SOURCE__ = sharedChildRuntimeSource;
+        window.__BOOKLET_GRAPH_RENDER_SOURCE__ = childGraphRenderSource;
+      }
+
+      function openBooklet(payload) {
+        const safeTitle = escapeHtml(payload.title || 'Weekly BP');
+    const pageInfo = resolvePageSizeInfo(payload.pageSize);
+    const pageWidth = pageInfo.width;
+    const pageHeight = pageInfo.height;
+    const pageSizeCss = `${pageWidth} ${pageHeight}`;
+  const pagePadding = resolvePagePadding(pageInfo.key);
+  const pagePaddingCss = formatPadding(pagePadding);
+    const pageScale = computePageScale(pageInfo);
+    const resolvedPageKey = pageInfo.key || DEFAULT_PAGE_SIZE;
+    const bodyClass = `size-${resolvedPageKey}`;
+    const scaledPx = (value) => {
+      if (!Number.isFinite(value)) return '0px';
+      if (pageScale <= 1) return `${value}px`;
+      const scaled = Math.round(value * pageScale * 100) / 100;
+      const normalized = Number.isFinite(scaled) ? parseFloat(scaled.toFixed(2)) : value;
+      return `${normalized}px`;
+    };
+    const fontScaleCss = pageScale > 1
+      ? `
+  body.${bodyClass} { font-size: ${scaledPx(16)}; }
+  body.${bodyClass} .page-cover h1 { font-size: ${scaledPx(46)}; }
+  body.${bodyClass} .page-cover h2 { font-size: ${scaledPx(20)}; }
+  body.${bodyClass} .page-vfp .vfp-heading h2 { font-size: ${scaledPx(34)}; }
+  body.${bodyClass} .page-vfp .vfp-text { font-size: ${scaledPx(20)}; }
+  body.${bodyClass} .page-vfp.font-small .vfp-text { font-size: ${scaledPx(18)}; }
+  body.${bodyClass} .page-vfp.font-large .vfp-text { font-size: ${scaledPx(22)}; }
+  body.${bodyClass} .page-vfp.font-xlarge .vfp-text { font-size: ${scaledPx(24)}; }
+  body.${bodyClass} .page-vfp .vfp-label { font-size: ${scaledPx(26)}; }
+  body.${bodyClass} .page-stat .info h3 { font-size: ${scaledPx(18)}; }
+  body.${bodyClass} .page-stat .info .meta { font-size: ${scaledPx(18)}; }
+  body.${bodyClass} .highcharts-data-label-custom { font-size: ${scaledPx(12)}; }
+  body.${bodyClass} .highcharts-data-label-text { font-size: ${scaledPx(12)}; }
+`
+      : '';
+        const bookletHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --page-width: ${pageWidth}; --page-height: ${pageHeight}; }
+    @page { size: ${pageSizeCss}; margin: 0; }
+    *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: #0f172a; font-family: 'Segoe UI', Roboto, Arial, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .toolbar { position: sticky; top: 0; z-index: 10; display: flex; justify-content: flex-end; gap: 12px; padding: 12px 16px; background: rgba(255,255,255,0.92); border-bottom: 1px solid rgba(15,23,42,0.12); box-shadow: 0 6px 20px -12px rgba(15,23,42,0.4); }
+    .toolbar button { border: 1px solid rgba(15,23,42,0.2); border-radius: 999px; padding: 6px 16px; background: #0f172a; color: #fff; font-weight: 600; cursor: pointer; }
+  .wrapper { width: 100%; max-width: calc(var(--page-width) + 2in); margin: 0 auto; padding: 36px 24px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+  .page { width: var(--page-width); height: var(--page-height); background: #fff; border-radius: 18px; box-shadow: 0 30px 70px -28px rgba(15,23,42,0.55); padding: ${pagePaddingCss}; display: flex; align-items: stretch; position: relative; overflow: hidden; break-after: page; }
+  .page-inner { height: 100%; }
+  .page:last-child { break-after: auto; }
+    .page-inner { flex: 1; background: linear-gradient(135deg, var(--base, #f8fafc) 0%, rgba(255,255,255,0.92) 64%); border: 2px solid rgba(15,23,42,0.12); border-radius: 16px; padding: 28px; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #0f172a; gap: 24px; }
+    .page-cover .page-inner { text-align: center; gap: 20px; }
+    .page-cover h1 { margin: 0; font-size: 46px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 800; }
+    .page-cover h2 { margin: 0; font-size: 20px; letter-spacing: 0.28em; text-transform: uppercase; color: rgba(15,23,42,0.65); }
+    .page-cover img { max-width: 58%; max-height: 58%; object-fit: contain; filter: drop-shadow(0 12px 24px rgba(15,23,42,0.2)); }
+    .page-logo { justify-content: center; align-items: center; }
+    .page-logo .page-inner { background: radial-gradient(circle at center, rgba(255,255,255,0.92) 0%, var(--base, #ffffff) 70%); }
+    .page-logo img { max-width: 65%; max-height: 65%; object-fit: contain; filter: drop-shadow(0 8px 18px rgba(15,23,42,0.25)); }
+  .page-vfp .page-inner { padding: 0.7in 0.85in; background: var(--base, #f8fafc); align-items: center; justify-content: flex-start; }
+  .page-vfp .vfp-body { width: 100%; max-width: calc(100% - 1.4in); margin: 0 auto; display: flex; flex-direction: column; align-items: center; gap: 26px; text-align: center; }
+  .page-vfp.width-wide .vfp-body { max-width: calc(100% - 0.6in); }
+  .page-vfp.width-narrow .vfp-body { max-width: calc(100% - 2.3in); }
+  .page-vfp.align-left .vfp-body { align-items: flex-start; text-align: left; margin-left: 0.3in; margin-right: auto; }
+  .page-vfp.align-right .vfp-body { align-items: flex-end; text-align: right; margin-right: 0.3in; margin-left: auto; }
+  .page-vfp.align-left .vfp-text { text-align: left; }
+  .page-vfp.align-right .vfp-text { text-align: right; }
+  .page-vfp .vfp-heading { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; text-transform: uppercase; letter-spacing: 0.28em; text-align: center; }
+  .page-vfp .vfp-heading h2 { margin: 0; font-size: 34px; font-weight: 800; letter-spacing: 0.24em; }
+  .page-vfp .vfp-label { font-size: 1.15rem; letter-spacing: 0.42em; font-weight: 800; color: rgba(15,23,42,0.6); }
+  .page-vfp .vfp-text { width: 100%; font-size: 20px; font-weight: 700; text-transform: uppercase; color: rgba(15,23,42,0.9); }
+  .page-vfp .vfp-text p { margin: 0 0 18px; line-height: 1.6; }
+  .page-vfp .vfp-text p:last-child { margin-bottom: 0; }
+  .page-vfp.scale-compact .vfp-text p { line-height: 1.45; }
+  .page-vfp.scale-large .vfp-text p { line-height: 1.75; }
+  .page-vfp.font-small .vfp-text { font-size: 18px; }
+  .page-vfp.font-large .vfp-text { font-size: 22px; }
+  .page-vfp.font-xlarge .vfp-text { font-size: 24px; }
+  .page-vfp-continuation .vfp-body { margin-top: 0; }
+  .page-vfp-continuation .page-inner { justify-content: flex-start; }
+  .page-stat .page-inner { flex-direction: row; align-items: stretch; gap: 32px; padding: 32px 36px; background: var(--base, #f8fafc); }
+  .page-stat .info { width: 2.9in; display: flex; flex-direction: column; gap: 18px; }
+  .page-stat .info h3 { margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 800; line-height: 1.3; }
+  .page-stat .info .meta { font-size: 18px; font-weight: 700; text-transform: uppercase; color: rgba(15,23,42,0.85); line-height: 1.35; }
+  .page-stat .divider { width: 2px; background: rgba(15,23,42,0.22); border-radius: 999px; }
+  .page-stat .chart { flex: 1; min-height: 0; height: 100%; }
+    @media print {
+      body { background: #fff; margin: 0 !important; min-height: auto !important; display: block !important; }
+      .toolbar { display: none !important; }
+      .wrapper { padding: 0 !important; gap: 0 !important; display: block !important; max-width: unset !important; width: auto !important; }
+      .page { box-shadow: none; border-radius: 0; margin: 0 auto !important; display: block !important; page-break-after: always !important; break-after: page !important; break-before: avoid-page !important; page-break-inside: avoid !important; }
+      .page:last-child { page-break-after: auto !important; break-after: auto !important; }
+    }
+  .highcharts-data-label span,.highcharts-label span{display:inline-block!important;white-space:nowrap!important;width:auto!important;max-width:fit-content!important;padding:0!important;margin:0!important}
+.highcharts-label-box,.highcharts-data-label-box{width:auto!important;height:auto!important;max-width:fit-content!important;max-height:fit-content!important;transform:translate(0,0)!important}
+.highcharts-data-label-wrapper{position:relative;display:inline-block}
+.highcharts-data-label-custom{display:inline-flex;flex-direction:column;align-items:center;padding:0;color:#0f172a;font-size:11px;font-weight:600;letter-spacing:.04em;line-height:1.1;pointer-events:none;position:relative;overflow:visible;background:none;z-index:6;gap:0;--label-lift:0px}
+.highcharts-data-label-custom.is-below{flex-direction:column-reverse;transform:translateY(var(--label-lift,0px))}
+.highcharts-data-label-custom.is-above{flex-direction:column;transform:translateY(calc(-1 * var(--label-lift,0px)))}
+.highcharts-data-label-custom.is-above .highcharts-data-label-text{margin-bottom:var(--label-gap,8px)}
+.highcharts-data-label-custom.is-below .highcharts-data-label-text{margin-top:var(--label-gap,8px)}
+.highcharts-data-label-text{position:relative;display:inline-flex;align-items:center;justify-content:center;padding:var(--label-pad-y,2px) var(--label-pad-x,4px);min-width:var(--label-min-width,8px);max-width:var(--label-max-width,220px);white-space:nowrap;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:var(--label-letter-spacing,0.08em);line-height:1.05;transform:rotate(-90deg);transform-origin:center center;background:rgba(255,255,255,.65);border-radius:3px;text-shadow:none;overflow:visible;z-index:1}
+.highcharts-data-label-text:before{content:'';position:absolute;top:calc(-1 * var(--halo-outer,4px));bottom:calc(-1 * var(--halo-outer,4px));left:50%;width:calc(100% + var(--halo-expand,0px));transform:translateX(-50%);background:radial-gradient(ellipse 85% 125% at 50% 50%,rgba(255,255,255,.72) 0%,rgba(255,255,255,.4) 58%,rgba(255,255,255,.05) 88%,rgba(255,255,255,0) 100%);border-radius:4px;filter:blur(4px);opacity:.68;pointer-events:none;z-index:-1}
+.highcharts-data-label-text:after{content:'';position:absolute;top:calc(-1 * (var(--halo-outer,4px) - 2px));bottom:calc(-1 * (var(--halo-outer,4px) - 2px));left:-1px;right:-1px;background:radial-gradient(ellipse 95% 110% at 50% 50%,rgba(255,255,255,.54) 0%,rgba(255,255,255,.22) 60%,rgba(255,255,255,0) 100%);border-radius:3px;filter:blur(3px);opacity:.6;pointer-events:none;z-index:-2}
+.highcharts-data-label-custom.has-long-number .highcharts-data-label-text{--label-letter-spacing:.05em}
+.highcharts-data-label-custom.has-extended-length .highcharts-data-label-text{--label-pad-x:6px;--halo-expand:6px;--halo-outer:6px}
+.highcharts-data-label-custom.is-short-number .highcharts-data-label-text{--label-pad-x:3px;--label-min-width:0;--halo-expand:-6px;--halo-outer:3px;--label-letter-spacing:.06em}
+.highcharts-data-label-custom .highcharts-data-label-tick{position:absolute;left:50%;transform:translateX(-50%);width:var(--tick-width,1.6px);height:var(--tick-length,9px);background:var(--tick-color,rgba(15,23,42,.38));border-radius:999px;pointer-events:none}
+.highcharts-data-label-custom.is-above .highcharts-data-label-tick{top:100%}
+.highcharts-data-label-custom.is-below .highcharts-data-label-tick{bottom:100%}
+    ${fontScaleCss}
+  </style>
+</head>
+<body class="${bodyClass}">
+  <div class="toolbar">
+    <button id="printBtn">Print</button>
+  </div>
+  <div class="wrapper" id="pages"></div>
+  <script src="assets/js/highcharts.js"></script>
+  <script>
+  window.__staffLabelEngine = function (point, overrideOptions) {
+    const builder = typeof window.buildBookletHtmlLabelFormatter === 'function'
+      ? window.buildBookletHtmlLabelFormatter
+      : null;
+    if (builder) {
+      const series = this && this.series;
+      const seriesOptions = series && (series.userOptions || series.options);
+      const baseOptions = (overrideOptions && typeof overrideOptions === 'object')
+        ? overrideOptions
+        : (seriesOptions && seriesOptions.__bookletLabelOptions) || {};
+      const prefixPart = baseOptions && baseOptions.prefix != null ? baseOptions.prefix : '';
+      const suffixPart = baseOptions && baseOptions.suffix != null ? baseOptions.suffix : '';
+      const decimalsValue = baseOptions && typeof baseOptions.decimals === 'number' ? baseOptions.decimals : Number.NaN;
+      const decimalsPart = Number.isFinite(decimalsValue) ? decimalsValue : '';
+      const tickHeightValue = baseOptions && typeof baseOptions.tickHeight === 'number' ? baseOptions.tickHeight : Number.NaN;
+      const tickHeightPart = Number.isFinite(tickHeightValue) ? tickHeightValue : '';
+      const percentFlag = baseOptions && baseOptions.formatContext && baseOptions.formatContext.isPercent ? 'p' : '';
+      const moneyFlag = baseOptions && baseOptions.formatContext && baseOptions.formatContext.isMoney ? 'm' : '';
+      const cacheKey = [prefixPart, suffixPart, decimalsPart, tickHeightPart, percentFlag, moneyFlag].join('|');
+      if (series) {
+        const cache = series.__bookletLabelFormatterCache || {};
+        if (cache.key !== cacheKey) {
+          const generated = builder(baseOptions);
+          if (typeof generated === 'function') {
+            series.__bookletLabelFormatterCache = { key: cacheKey, fn: generated };
+          } else {
+            series.__bookletLabelFormatterCache = null;
+          }
+        }
+        const cachedFormatter = series.__bookletLabelFormatterCache && series.__bookletLabelFormatterCache.fn;
+        if (typeof cachedFormatter === 'function') {
+          return cachedFormatter.call(this);
+        }
+      } else {
+        const generated = builder(baseOptions);
+        if (typeof generated === 'function') {
+          return generated.call(this);
+        }
+      }
+    }
+    if (!point || point.y == null) return "";
+    const value = ("" + point.y).trim();
+    return '<span class="highcharts-data-label-text">' + value + '</span>';
+  };
+
+  </script>
+</body>
+</html>`;
+        const win = window.open('', '_blank');
+        if (!win) {
+          showStatus('Popup blocked. Allow pop-ups to view the booklet.', 'warning');
+          return;
+        }
+        if (typeof computeAxisBounds === 'function') {
+          try {
+            win.computeAxisBounds = computeAxisBounds;
+          } catch (error) {
+            /* ignore cross-window assignment issues */
+          }
+        }
+        win.document.open();
+        win.document.write(bookletHtml);
+        win.document.close();
+        win.__BOOKLET_DATA = payload;
+        const inject = () => {
+          const runtimeEl = win.document.createElement('script');
+          runtimeEl.type = 'text/javascript';
+          runtimeEl.textContent = '(' + sharedChildRuntimeSource.toString() + ')();';
+          win.document.body.appendChild(runtimeEl);
+
+          const scriptEl = win.document.createElement('script');
+          scriptEl.type = 'text/javascript';
+          scriptEl.textContent = '(' + childRenderSource.toString() + ')();';
+          win.document.body.appendChild(scriptEl);
+        };
+        if (win.document.readyState === 'complete') {
+          inject();
+        } else {
+          win.addEventListener('load', inject, { once: true });
+        }
+      }
+
+if (typeof window !== 'undefined') {
+    window.openBooklet = openBooklet;
+}
+
+
+      function openGraphBook(payload) {
+        const safeTitle = escapeHtml(payload.title || 'Weekly Graphs');
+    const pageInfo = resolvePageSizeInfo(payload.pageSize);
+    const pageWidth = pageInfo.width;
+    const pageHeight = pageInfo.height;
+    const pageSizeCss = `${pageWidth} ${pageHeight}`;
+  const pagePadding = resolvePagePadding(pageInfo.key);
+  const graphPadding = {
+    top: Math.max(pagePadding.top - 0.2, 0.35),
+    side: Math.max(pagePadding.side - 0.3, 0.45),
+    bottom: Math.max(pagePadding.bottom - 0.15, 0.35)
+  };
+  const pagePaddingCss = formatPadding(graphPadding);
+    const pageScale = computePageScale(pageInfo);
+    const resolvedPageKey = pageInfo.key || DEFAULT_PAGE_SIZE;
+    const bodyClass = `size-${resolvedPageKey}`;
+    const scaledPx = (value) => {
+      if (!Number.isFinite(value)) return '0px';
+      if (pageScale <= 1) return `${value}px`;
+      const scaled = Math.round(value * pageScale * 100) / 100;
+      const normalized = Number.isFinite(scaled) ? parseFloat(scaled.toFixed(2)) : value;
+      return `${normalized}px`;
+    };
+    const fontScaleCss = pageScale > 1
+      ? `
+  body.${bodyClass} { font-size: ${scaledPx(16)}; }
+  body.${bodyClass} .page-graph-title { font-size: ${scaledPx(18)}; }
+  body.${bodyClass} .page-graph-subtitle { font-size: ${scaledPx(16)}; }
+  body.${bodyClass} .page-graph-overline,
+  body.${bodyClass} .page-graph-meta { font-size: ${scaledPx(13)}; }
+  body.${bodyClass} .page-graph-side .page-graph-title { font-size: ${scaledPx(20)}; }
+  body.${bodyClass} .page-graph-side .page-graph-subtitle { font-size: ${scaledPx(18)}; }
+  body.${bodyClass} .highcharts-data-label-custom { font-size: ${scaledPx(12)}; }
+  body.${bodyClass} .highcharts-data-label-text { font-size: ${scaledPx(12)}; }
+`
+      : '';
+        const graphHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --page-width: ${pageWidth}; --page-height: ${pageHeight}; }
+  @page { size: ${pageSizeCss}; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: #ffffff; font-family: 'Segoe UI', Roboto, Arial, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  .toolbar { position: sticky; top: 0; z-index: 10; display: flex; justify-content: flex-end; gap: 12px; padding: 12px 16px; background: rgba(255,255,255,0.95); border-bottom: 1px solid rgba(15,23,42,0.08); box-shadow: 0 6px 18px -12px rgba(15,23,42,0.2); }
+    .toolbar button { border: 1px solid rgba(15,23,42,0.2); border-radius: 999px; padding: 6px 16px; background: #0f172a; color: #fff; font-weight: 600; cursor: pointer; }
+  .wrapper { width: 100%; max-width: calc(var(--page-width) + 2in); margin: 0 auto; padding: 36px 24px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+  .page { width: var(--page-width); height: var(--page-height); background: #fff; border-radius: 16px; box-shadow: 0 28px 60px -32px rgba(15,23,42,0.55); padding: ${pagePaddingCss}; display: flex; align-items: stretch; position: relative; overflow: hidden; break-after: page; }
+  .page:last-child { break-after: auto; }
+  .page-graph-inner { flex: 1; display: flex; flex-direction: column; gap: 20px; border: 1px solid rgba(15,23,42,0.12); border-radius: 14px; padding: 46px 24px 18px; background: #ffffff; height: 100%; box-sizing: border-box; }
+  .page-graph-inner.split { flex-direction: row; align-items: stretch; gap: 20px; justify-content: space-between; }
+  .page-graph-info { width: 2.8in; display: flex; flex-direction: column; gap: 12px; justify-content: flex-start; align-items: center; text-align: center; color: #0f172a; font-weight: 600; }
+  .page-graph-info > * { margin: 0; }
+  .page-graph-info .page-graph-overline,
+  .page-graph-info .page-graph-title,
+  .page-graph-info .page-graph-subtitle,
+  .page-graph-info .page-graph-meta { width: 100%; }
+  .page-graph-divider { width: 2px; align-self: stretch; background: rgba(15,23,42,0.16); border-radius: 999px; }
+  .page-graph-header { display: flex; align-items: flex-start; justify-content: flex-start; gap: 18px; }
+  .page-graph-header.simple { border-bottom: 1px solid rgba(15,23,42,0.15); padding-bottom: 18px; }
+  .page-graph-header.simple.with-logo { align-items: center; }
+  .page-graph-titles { display: flex; flex-direction: column; gap: 6px; }
+    .page-graph-overline { font-size: 0.75rem; letter-spacing: 0.32em; text-transform: uppercase; color: rgba(15,23,42,0.55); font-weight: 700; }
+  .page-graph-title { margin: 0; font-size: 1rem; letter-spacing: 0.08em; font-weight: 700; color: #0f172a; }
+  .page-graph-subtitle { font-size: 0.9rem; letter-spacing: 0.04em; color: rgba(15,23,42,0.7); font-weight: 600; }
+  .page-graph-meta { font-size: 0.8rem; letter-spacing: 0.18em; color: rgba(15,23,42,0.55); font-weight: 600; }
+  .page-graph-logo { display: flex; align-items: center; justify-content: center; }
+  .page-graph-logo img { max-height: 72px; max-width: 100%; object-fit: contain; }
+  .page-graph-logo.top { width: 1.75in; max-width: 30%; }
+  .page-graph-logo.side { align-self: center; margin-bottom: 0.25in; }
+  .page-graph-chart { flex: 1; min-height: 0; display: flex; align-items: stretch; padding-bottom: 8px; }
+    .page-graph-chart .chart { flex: 1; margin-bottom: 6px; }
+  .page-graph-side .page-graph-inner.split { gap: 12px; }
+  .page-graph-side .page-graph-info { width: auto; min-width: 1.75in; max-width: 2.3in; padding-left: 10px; padding-right: 12px; align-items: flex-start; text-align: left; }
+  .page-graph-side .page-graph-divider { margin-left: 0; margin-right: 12px; }
+  .page-graph-side .page-graph-title,
+  .page-graph-side .page-graph-subtitle { font-size: 18px; letter-spacing: 0.05em; }
+  .page-graph-side .page-graph-subtitle { font-weight: 600; color: rgba(15,23,42,0.75); }
+    @media print {
+      body { background: #fff; margin: 0 !important; min-height: auto !important; display: block !important; }
+      .toolbar { display: none !important; }
+      .wrapper { padding: 0 !important; gap: 0 !important; display: block !important; max-width: unset !important; width: auto !important; }
+      .page { box-shadow: none; border-radius: 0; margin: 0 auto !important; display: block !important; page-break-after: always !important; break-after: page !important; break-before: avoid-page !important; page-break-inside: avoid !important; }
+      .page:last-child { page-break-after: auto !important; break-after: auto !important; }
+    }
+  .highcharts-data-label span,.highcharts-label span{display:inline-block!important;white-space:nowrap!important;width:auto!important;max-width:fit-content!important;padding:0!important;margin:0!important}
+.highcharts-label-box,.highcharts-data-label-box{width:auto!important;height:auto!important;max-width:fit-content!important;max-height:fit-content!important;transform:translate(0,0)!important;rx:3px!important;ry:3px!important}
+.highcharts-data-label-wrapper{position:relative;display:inline-block}
+.highcharts-data-label-custom{display:inline-flex;flex-direction:column;align-items:center;padding:0;color:#0f172a;font-size:11px;font-weight:600;letter-spacing:.04em;line-height:1.1;pointer-events:none;position:relative;overflow:visible;background:none;z-index:6;gap:0;--label-lift:0px}
+.highcharts-data-label-custom.is-below{flex-direction:column-reverse;transform:translateY(var(--label-lift,0px))}
+.highcharts-data-label-custom.is-above{flex-direction:column;transform:translateY(calc(-1 * var(--label-lift,0px)))}
+.highcharts-data-label-custom.is-above .highcharts-data-label-text{margin-bottom:var(--label-gap,8px)}
+.highcharts-data-label-custom.is-below .highcharts-data-label-text{margin-top:var(--label-gap,8px)}
+.highcharts-data-label-text{position:relative;display:inline-flex;align-items:center;justify-content:center;padding:var(--label-pad-y,2px) var(--label-pad-x,4px);min-width:var(--label-min-width,8px);max-width:var(--label-max-width,220px);white-space:nowrap;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:var(--label-letter-spacing,0.08em);line-height:1.05;transform:rotate(-90deg);transform-origin:center center;background:rgba(255,255,255,.65);border-radius:3px;text-shadow:none;overflow:visible;z-index:1}
+.highcharts-data-label-text:before{content:'';position:absolute;top:calc(-1 * var(--halo-outer,4px));bottom:calc(-1 * var(--halo-outer,4px));left:50%;width:calc(100% + var(--halo-expand,0px));transform:translateX(-50%);background:radial-gradient(ellipse 85% 125% at 50% 50%,rgba(255,255,255,.72) 0%,rgba(255,255,255,.4) 58%,rgba(255,255,255,.05) 88%,rgba(255,255,255,0) 100%);border-radius:4px;filter:blur(4px);opacity:.68;pointer-events:none;z-index:-1}
+.highcharts-data-label-text:after{content:'';position:absolute;top:calc(-1 * (var(--halo-outer,4px) - 2px));bottom:calc(-1 * (var(--halo-outer,4px) - 2px));left:-1px;right:-1px;background:radial-gradient(ellipse 95% 110% at 50% 50%,rgba(255,255,255,.54) 0%,rgba(255,255,255,.22) 60%,rgba(255,255,255,0) 100%);border-radius:3px;filter:blur(3px);opacity:.6;pointer-events:none;z-index:-2}
+.highcharts-data-label-custom.has-long-number .highcharts-data-label-text{--label-letter-spacing:.05em}
+.highcharts-data-label-custom.has-extended-length .highcharts-data-label-text{--label-pad-x:6px;--halo-expand:6px;--halo-outer:6px}
+.highcharts-data-label-custom.is-short-number .highcharts-data-label-text{--label-pad-x:3px;--label-min-width:0;--halo-expand:-6px;--halo-outer:3px;--label-letter-spacing:.06em}
+.highcharts-data-label-custom .highcharts-data-label-tick{position:absolute;left:50%;transform:translateX(-50%);width:var(--tick-width,1.6px);height:var(--tick-length,9px);background:var(--tick-color,rgba(15,23,42,.38));border-radius:999px;pointer-events:none}
+.highcharts-data-label-custom.is-above .highcharts-data-label-tick{top:100%}
+.highcharts-data-label-custom.is-below .highcharts-data-label-tick{bottom:100%}
+
+    ${fontScaleCss}
+  </style>
+</head>
+<body class="${bodyClass}">
+  <div class="toolbar">
+    <button id="printBtn">Print</button>
+  </div>
+  <div class="wrapper" id="pages"></div>
+  <script src="assets/js/highcharts.js"></script>
+  <script>
+  window.__staffLabelEngine = function (point, overrideOptions) {
+    const builder = typeof window.buildBookletHtmlLabelFormatter === 'function'
+      ? window.buildBookletHtmlLabelFormatter
+      : null;
+    if (builder) {
+      const series = this && this.series;
+      const seriesOptions = series && (series.userOptions || series.options);
+      const baseOptions = (overrideOptions && typeof overrideOptions === 'object')
+        ? overrideOptions
+        : (seriesOptions && seriesOptions.__bookletLabelOptions) || {};
+      const prefixPart = baseOptions && baseOptions.prefix != null ? baseOptions.prefix : '';
+      const suffixPart = baseOptions && baseOptions.suffix != null ? baseOptions.suffix : '';
+      const decimalsValue = baseOptions && typeof baseOptions.decimals === 'number' ? baseOptions.decimals : Number.NaN;
+      const decimalsPart = Number.isFinite(decimalsValue) ? decimalsValue : '';
+      const tickHeightValue = baseOptions && typeof baseOptions.tickHeight === 'number' ? baseOptions.tickHeight : Number.NaN;
+      const tickHeightPart = Number.isFinite(tickHeightValue) ? tickHeightValue : '';
+      const percentFlag = baseOptions && baseOptions.formatContext && baseOptions.formatContext.isPercent ? 'p' : '';
+      const moneyFlag = baseOptions && baseOptions.formatContext && baseOptions.formatContext.isMoney ? 'm' : '';
+      const cacheKey = [prefixPart, suffixPart, decimalsPart, tickHeightPart, percentFlag, moneyFlag].join('|');
+      if (series) {
+        const cache = series.__bookletLabelFormatterCache || {};
+        if (cache.key !== cacheKey) {
+          const generated = builder(baseOptions);
+          if (typeof generated === 'function') {
+            series.__bookletLabelFormatterCache = { key: cacheKey, fn: generated };
+          } else {
+            series.__bookletLabelFormatterCache = null;
+          }
+        }
+        const cachedFormatter = series.__bookletLabelFormatterCache && series.__bookletLabelFormatterCache.fn;
+        if (typeof cachedFormatter === 'function') {
+          return cachedFormatter.call(this);
+        }
+      } else {
+        const generated = builder(baseOptions);
+        if (typeof generated === 'function') {
+          return generated.call(this);
+        }
+      }
+    }
+    if (!point || point.y == null) return "";
+    const value = ("" + point.y).trim();
+    return '<span class="highcharts-data-label-text">' + value + '</span>';
+  };
+
+  </script>
+</body>
+</html>`;
+        const win = window.open('', '_blank');
+        if (!win) {
+          showStatus('Popup blocked. Allow pop-ups to view the graphs.', 'warning');
+          return;
+        }
+        if (typeof computeAxisBounds === 'function') {
+          try {
+            win.computeAxisBounds = computeAxisBounds;
+          } catch (error) {
+            /* ignore cross-window assignment issues */
+          }
+        }
+        win.document.open();
+        win.document.write(graphHtml);
+        win.document.close();
+        win.__BOOKLET_DATA = payload;
+        const inject = () => {
+          const runtimeEl = win.document.createElement('script');
+          runtimeEl.type = 'text/javascript';
+          runtimeEl.textContent = '(' + sharedChildRuntimeSource.toString() + ')();';
+          win.document.body.appendChild(runtimeEl);
+
+          const scriptEl = win.document.createElement('script');
+          scriptEl.type = 'text/javascript';
+          scriptEl.textContent = '(' + childGraphRenderSource.toString() + ')();';
+          win.document.body.appendChild(scriptEl);
+        };
+        if (win.document.readyState === 'complete') {
+          inject();
+        } else {
+          win.addEventListener('load', inject, { once: true });
+        }
+      }
+
+      // 🔓 Export globally so graphmode.html can call it
+if (typeof window !== 'undefined') {
+    window.openGraphBook = openGraphBook;
+}
+
+
+      function handleGenerate() {
+        try {
+          if (model && model.graphOnly) {
+            showStatus('This CSV only supports Graph Mode (no Division column detected). Use “Open Graph Binder” instead.', 'info');
+            return;
+          }
+          const payload = buildBookletPayload();
+          openBooklet(payload);
+        } catch (err) {
+          showStatus(err.message, 'warning');
+        }
+      }
+
+function handleGenerateGraphs() {
+    try {
+        const payload = buildGraphPayload();
+        if (payload.logoMode === 'show' && !payload.logo) {
+            payload.logoMode = 'none';
+            showStatus('Graph mode logo option selected but no logo uploaded; continuing without logo.', 'info');
+        }
+        window.openGraphBook(payload);   // 👈 DIRECTLY OPEN GRAPH MODE
+    } catch (err) {
+        showStatus(err.message, 'warning');
+    }
+}
+
+
+      if (csvInput) {
+        csvInput.addEventListener('change', handleCsvChange);
+      }
+      if (logoInput) {
+        logoInput.addEventListener('change', handleLogoChange);
+      }
+      if (divisionContainer) {
+        divisionContainer.addEventListener('click', handleDivisionClick);
+        divisionContainer.addEventListener('change', handleDivisionChange);
+        divisionContainer.addEventListener('dragstart', handleDragStart);
+        divisionContainer.addEventListener('dragover', handleDragOver);
+        divisionContainer.addEventListener('drop', handleDrop);
+        divisionContainer.addEventListener('dragend', handleDragEnd);
+      }
+      if (generateBtn) {
+        generateBtn.addEventListener('click', handleGenerate);
+      }
+      if (downloadSettingsBtn) {
+        downloadSettingsBtn.addEventListener('click', downloadSettings);
+      }
+      if (editCsvBtn) {
+        editCsvBtn.addEventListener('click', openCsvEditor);
+      }
+      if (csvEditorApplyBtn) {
+        csvEditorApplyBtn.addEventListener('click', applyCsvEditorChanges);
+      }
+      if (csvEditorModalEl) {
+        csvEditorModalEl.addEventListener('input', handleCsvEditorInput);
+        csvEditorModalEl.addEventListener('shown.bs.modal', () => {
+          if (!csvEditorTableBody) return;
+          const firstInput = csvEditorTableBody.querySelector('.csv-editor-input');
+          if (firstInput) {
+            firstInput.focus({ preventScroll: false });
+          }
+        });
+        csvEditorModalEl.addEventListener('hidden.bs.modal', () => {
+          csvEditorWorking = null;
+          csvEditorDirty = false;
+          updateCsvEditorApplyState();
+          clearCsvEditorAlert();
+          if (csvEditorSearchDebounce) {
+            clearTimeout(csvEditorSearchDebounce);
+            csvEditorSearchDebounce = null;
+          }
+        });
+      }
+      if (csvEditorShowGaps) {
+        csvEditorShowGaps.addEventListener('change', () => {
+          csvEditorFilters.showGaps = csvEditorShowGaps.checked;
+          renderCsvEditorTable();
+        });
+      }
+      if (csvEditorSearchInput) {
+        csvEditorSearchInput.addEventListener('input', () => {
+          csvEditorFilters.search = csvEditorSearchInput.value || '';
+          if (csvEditorSearchDebounce) {
+            clearTimeout(csvEditorSearchDebounce);
+          }
+          csvEditorSearchDebounce = setTimeout(() => {
+            renderCsvEditorTable();
+          }, 180);
+        });
+      }
+      if (pageSizeSelect) {
+        pageSizeSelect.addEventListener('change', (event) => {
+          pageSize = event.target.value;
+        });
+      }
+      if (defaultThemeSelect) {
+        defaultThemeSelect.addEventListener('change', (event) => {
+          const value = event.target.value;
+          if (COLOR_KEYS.includes(value)) {
+            defaultThemeKey = value;
+            if (model && model.settings) {
+              model.settings.defaultThemeKey = value;
+            }
+          }
+          refreshDefaultThemeLabel();
+        });
+      }
+      if (statTitleModeSelect) {
+        statTitleModeSelect.addEventListener('change', (event) => {
+          statTitleMode = event.target.value;
+          renderDivisions(true);
+        });
+      }
+      if (graphHeadingSelect) {
+        graphHeadingSelect.addEventListener('change', (event) => {
+          graphHeadingMode = event.target.value;
+        });
+      }
+      if (graphLogoSelect) {
+        graphLogoSelect.addEventListener('change', (event) => {
+          graphLogoMode = event.target.value;
+        });
+      }
+      if (graphLayoutSelect) {
+        graphLayoutSelect.addEventListener('change', (event) => {
+          graphLayoutMode = event.target.value;
+        });
+      }
+      updateCsvEditorApplyState();
+      if (generateGraphsBtn) {
+        generateGraphsBtn.addEventListener('click', handleGenerateGraphs);
+      }
+      if (divisionSettingsModalEl) {
+        divisionSettingsModalEl.addEventListener('shown.bs.modal', () => {
+          if (divisionModalFocusField === 'color' && divisionColorSelect) {
+            divisionColorSelect.focus();
+            divisionModalFocusField = null;
+          }
+        });
+        divisionSettingsModalEl.addEventListener('hidden.bs.modal', () => {
+          editingDivisionIndex = null;
+          divisionModalFocusField = null;
+        });
+      }
+      if (divisionSettingsSave) {
+        divisionSettingsSave.addEventListener('click', () => {
+          if (!model || editingDivisionIndex == null) {
+            if (divisionModal) divisionModal.hide();
+            return;
+          }
+          const division = model.divisions[editingDivisionIndex];
+          if (!division) {
+            if (divisionModal) divisionModal.hide();
+            return;
+          }
+          if (divisionVfpInput) {
+            division.vfpText = divisionVfpInput.value;
+          }
+          if (divisionColorSelect) {
+            const key = divisionColorSelect.value;
+            if (key && COLOR_THEMES[key]) {
+              const theme = COLOR_THEMES[key];
+              division.color = { ...theme };
+              division.colorKey = theme.key;
+            }
+          }
+          let pendingAccent = null;
+          let resetAccent = false;
+          let initialAccent = null;
+          if (divisionCustomColorInput) {
+            if (divisionCustomColorInput.dataset.reset === 'true') {
+              resetAccent = true;
+              delete divisionCustomColorInput.dataset.reset;
+            } else {
+              pendingAccent = normalizeHexColor(divisionCustomColorInput.value);
+            }
+            if (divisionCustomColorInput.dataset.initial) {
+              initialAccent = normalizeHexColor(divisionCustomColorInput.dataset.initial);
+            }
+          }
+          if (resetAccent) {
+            division.customAccent = null;
+            const theme = COLOR_THEMES[division.colorKey] || COLOR_THEMES[COLOR_KEYS[0]];
+            if (theme) {
+              division.color = { ...theme };
+            }
+          } else if (pendingAccent) {
+            const palette = paletteFromAccent(pendingAccent);
+            const accentChanged = pendingAccent !== initialAccent;
+            if (palette && (division.customAccent || accentChanged)) {
+              division.customAccent = palette.accent;
+              division.color = { ...division.color, ...palette, key: division.colorKey };
+            }
+          } else if (!division.customAccent) {
+            division.customAccent = null;
+          }
+          if (divisionCustomColorReset) {
+            divisionCustomColorReset.disabled = !division.customAccent;
+          }
+          if (divisionVfpAlignSelect) {
+            const align = divisionVfpAlignSelect.value;
+            division.vfpAlign = ['left', 'right', 'center'].includes(align) ? align : 'center';
+          }
+          if (divisionVfpWidthSelect) {
+            const width = divisionVfpWidthSelect.value;
+            division.vfpWidth = ['standard', 'wide', 'narrow'].includes(width) ? width : 'wide';
+          }
+          if (divisionVfpScaleSelect) {
+            const scale = divisionVfpScaleSelect.value;
+            division.vfpScale = scale === 'compact' || scale === 'large' || scale === 'normal' ? scale : 'normal';
+          }
+          if (divisionVfpFontSelect) {
+            const font = divisionVfpFontSelect.value;
+            division.vfpFont = ['small', 'medium', 'large', 'xlarge'].includes(font) ? font : 'large';
+          }
+          if (divisionCustomColorDefault && divisionCustomColorDefault.checked) {
+            divisionCustomColorDefault.checked = false;
+            if (division.customAccent) {
+              defaultCustomAccent = division.customAccent;
+              if (model.settings) {
+                model.settings.defaultCustomAccent = defaultCustomAccent;
+              }
+              const palette = paletteFromAccent(defaultCustomAccent);
+              if (palette) {
+                model.divisions.forEach((otherDivision, idx) => {
+                  if (idx === editingDivisionIndex) return;
+                  if (otherDivision.customAccent) return;
+                  otherDivision.color = { ...otherDivision.color, ...palette, key: otherDivision.colorKey };
+                });
+              }
+            }
+          }
+          if (divisionModal) divisionModal.hide();
+          renderDivisions(true);
+        });
+      }
+      if (divisionColorSelect && divisionCustomColorInput) {
+        divisionColorSelect.addEventListener('change', () => {
+          if (divisionCustomColorReset && !divisionCustomColorReset.disabled) {
+            return;
+          }
+          const theme = COLOR_THEMES[divisionColorSelect.value];
+          if (theme) {
+            const accentHex = normalizeHexColor(theme.accent) || '#1D4ED8';
+            divisionCustomColorInput.value = accentHex;
+            divisionCustomColorInput.dataset.initial = accentHex;
+            if (divisionCustomColorReset) {
+              divisionCustomColorReset.disabled = true;
+            }
+          }
+        });
+      }
+      if (divisionCustomColorReset && divisionCustomColorInput) {
+        divisionCustomColorReset.addEventListener('click', () => {
+          divisionCustomColorInput.dataset.reset = 'true';
+          if (divisionColorSelect) {
+            const key = divisionColorSelect.value;
+            const theme = COLOR_THEMES[key] || COLOR_THEMES[COLOR_KEYS[0]];
+            if (theme) {
+              divisionCustomColorInput.value = normalizeHexColor(theme.accent) || '#1D4ED8';
+            }
+          }
+          if (divisionCustomColorDefault) {
+            divisionCustomColorDefault.checked = false;
+          }
+          divisionCustomColorReset.disabled = true;
+        });
+      }
+      if (divisionCustomColorInput) {
+        divisionCustomColorInput.addEventListener('input', () => {
+          if (divisionCustomColorInput.dataset.reset) {
+            delete divisionCustomColorInput.dataset.reset;
+          }
+          if (divisionCustomColorReset) {
+            divisionCustomColorReset.disabled = false;
+          }
+        });
+      }
+  });
+
+  // --- Highcharts NaN sanitizer: blocks NaN x/y/transform on data labels ---
+(function () {
+  if (!window.Highcharts || !Highcharts.SVGElement) return;
+
+  const isDataLabelEl = (el) => {
+    try {
+      const n = el && (el.element || el);
+      if (!n) return false;
+      const cls = (n.className && ('' + (n.className.baseVal || n.className))) || '';
+      return cls.indexOf('highcharts-data-label') !== -1 || cls.indexOf('highcharts-data-labels') !== -1;
+    } catch { return false; }
+  };
+
+  const origAttr = Highcharts.SVGElement.prototype.attr;
+  Highcharts.SVGElement.prototype.attr = function (hash, val, complete, continueAnimation) {
+    if (typeof hash === 'string' && typeof val === 'undefined' && arguments.length === 1) {
+      return origAttr.call(this, hash);
+    }
+
+    const obj = (typeof hash === 'string') ? { [hash]: val } : (hash || {});
+
+    if (isDataLabelEl(this)) {
+      ['x', 'y', 'translateX', 'translateY'].forEach((k) => {
+        if (k in obj && !Number.isFinite(obj[k])) {
+          delete obj[k];
+        }
+      });
+      if ('transform' in obj && typeof obj.transform === 'string' && /NaN/.test(obj.transform)) {
+        delete obj.transform;
+      }
+    }
+
+    if (typeof hash === 'string') {
+      const key = Object.keys(obj)[0];
+      return origAttr.call(this, key, obj[key], complete, continueAnimation);
+    }
+    return origAttr.call(this, obj, undefined, complete, continueAnimation);
+  };
+})();
+
+(function installHighchartsNaNTracer() {
+  if (typeof window === 'undefined') return;
+  if (window.__highchartsNaNTracerInstalled) return;
+  window.__highchartsNaNTracerInstalled = true;
+
+  console.info('🩺 NaN transform tracer installed (persistent mode)');
+
+  if (window.Highcharts && Highcharts.SVGElement && !Highcharts.SVGElement.__nanTracerWrapped) {
+    const currentAttr = Highcharts.SVGElement.prototype.attr;
+    Highcharts.SVGElement.prototype.__nanTracerWrapped = true;
+    Highcharts.SVGElement.prototype.attr = function tracedAttr(hash, val, ...rest) {
+      const attrs = typeof hash === 'string' ? { [hash]: val } : (hash || {});
+      if (attrs && attrs.transform && /NaN/.test(String(attrs.transform))) {
+        console.groupCollapsed('🚨 NaN transform written', attrs.transform, this.element?.className?.baseVal || this.element?.tagName || '(unknown)');
+        console.trace('Stack trace');
+        console.groupEnd();
+        delete attrs.transform;
+      }
+      if (attrs && typeof attrs === 'object') {
+        Object.keys(attrs).forEach((key) => {
+          const value = attrs[key];
+          if (typeof value === 'number' && !Number.isFinite(value)) {
+            delete attrs[key];
+          }
+        });
+      }
+      if (typeof hash === 'string') {
+        return currentAttr.call(this, hash, val, ...rest);
+      }
+      return currentAttr.call(this, attrs, undefined, ...rest);
+    };
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.attributeName !== 'transform') return;
+      const transformValue = mutation.target.getAttribute('transform') || '';
+      if (!/NaN/.test(transformValue)) return;
+      console.groupCollapsed('🚨 Direct DOM NaN transform mutation', mutation.target.className && mutation.target.className.baseVal ? mutation.target.className.baseVal : '(unnamed)');
+      console.trace('Stack trace');
+      console.groupEnd();
+      mutation.target.removeAttribute('transform');
+    });
+  });
+
+  const attachObserver = () => {
+    document.querySelectorAll('g.highcharts-data-label, g.highcharts-data-labels').forEach((group) => {
+      observer.observe(group, { attributes: true, attributeFilter: ['transform'] });
+    });
+  };
+
+  setTimeout(attachObserver, 500);
+
+  window.redrawAllChartsForNaNTrace = function redrawAllChartsForNaNTrace() {
+    console.log('🔁 Forcing redraw for NaN tracer...');
+    if (!window.Highcharts || !Array.isArray(Highcharts.charts)) return;
+    Highcharts.charts.forEach((chart) => {
+      if (chart && typeof chart.redraw === 'function') {
+        chart.redraw();
+      }
+    });
+  };
+})();
+
+(function installInlineStyleWatcher() {
+  if (typeof window === 'undefined' || window.__bookletStyleWatcherInstalled) return;
+  if (typeof window.MutationObserver !== 'function') return;
+  window.__bookletStyleWatcherInstalled = true;
+  const target = () => document && document.body ? document.body : null;
+  const root = target();
+  if (!root) return;
+  try {
+    const watcher = new MutationObserver((muts) => {
+      muts.forEach((mutation) => {
+        if (mutation.attributeName === 'style') {
+          console.warn('Style changed/removed from:', mutation.target);
+        }
+      });
+    });
+    watcher.observe(root, { attributes: true, attributeFilter: ['style'], subtree: true });
+    console.info('🔍 Inline style watcher installed.');
+  } catch (err) {
+    console.warn('Inline style watcher error:', err);
+  }
+})();
+
+
+// 🧩 Export chart helpers globally for runtime access
+if (typeof window !== 'undefined') {
+  window.sanitizeSeriesCollection = typeof sanitizeSeriesCollection !== 'undefined'
+    ? sanitizeSeriesCollection
+    : function fallbackSanitizeSeriesCollection(x) {
+        console.warn('sanitizeSeriesCollection missing');
+        return x;
+      };
+
+  window.sanitizeSeriesDataForChart = typeof sanitizeSeriesDataForChart === 'function'
+    ? sanitizeSeriesDataForChart
+    : function fallbackSanitizeSeriesDataForChart(series) {
+        return Array.isArray(series) ? series : [];
+      };
+
+  window.computeAxisBounds = typeof computeAxisBounds !== 'undefined'
+    ? computeAxisBounds
+    : function fallbackComputeAxisBounds() {
+        return { min: 0, max: 0 };
+      };
+
+  window.toFiniteNumber = typeof toFiniteNumber !== 'undefined'
+    ? toFiniteNumber
+    : function fallbackToFiniteNumber(v) {
+        const numeric = Number(v);
+        return Number.isFinite(numeric) ? numeric : null;
+      };
+
+  console.info('✅ Booklet global helpers exported.');
+
+
+}
+// FINAL ENFORCEMENT – RUNS AFTER ALL OTHER OVERRIDES
+(function () {
+    if (!window.Highcharts) return;
+
+    Highcharts.addEvent(Highcharts.Chart, 'load', function () {
+        const opts = this.options;
+
+        // enforce HTML globally
+        if (!opts.plotOptions) opts.plotOptions = {};
+        if (!opts.plotOptions.series) opts.plotOptions.series = {};
+        if (!opts.plotOptions.series.dataLabels) opts.plotOptions.series.dataLabels = {};
+
+        const enforced = opts.plotOptions.series.dataLabels;
+        if (enforced.useHTML !== false) {
+          enforced.useHTML = true;
+        }
+        if (enforced.enabled == null) {
+          enforced.enabled = true;
+        }
+    });
+})();
